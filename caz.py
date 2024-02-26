@@ -199,7 +199,7 @@ class ProcessWorker(multiprocessing.Process):
         self.lista = lista
     def run(self):
         global url, lista
-        for i in range(10000):
+        for i in range(100):
             Spammer(self.url, self.lista).start()
    
 class Spammer(threading.Thread):
