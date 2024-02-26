@@ -199,7 +199,7 @@ class ProcessWorker(multiprocessing.Process):
         self.lista = lista
     def run(self):
         global url, lista
-        for i in range(1000):
+        for i in range(10000):
             Spammer(self.url, self.lista).start()
    
 class Spammer(threading.Thread):
@@ -231,8 +231,8 @@ class MainLoop():
             os.system('color a')
             color = ['a', 'b', 'c', 'd', 'e', 'f']
             os.system('color %s' % (color[random.randint(0, 5)]))
-        print ("       /$$$$$$                                           /$$$$$$                      /$$     ")
-        print ("      /$$__  $$                                         /$$__  $$                    |__/     ")
+        print ("\n     /$$$$$$                                           /$$$$$$                      /$$   \n")
+        print ("      /$$__  $$                                         /$$__  $$                    |__/   \n")
         print ("     | $$  \__/  /$$$$$$  /$$$$$$$$ /$$$$$$$$ /$$   /$$| $$  \__/  /$$$$$$   /$$$$$$$ /$$     ")
         print ("     | $$       |____  $$|____ /$$/|____ /$$/| $$  | $$|  $$$$$$  /$$__  $$ /$$_____/| $$     ")
         print ("     | $$        /$$$$$$$   /$$$$/    /$$$$/ | $$  | $$ \____  $$| $$  \ $$| $$      | $$     ")
@@ -240,8 +240,8 @@ class MainLoop():
         print ("     |  $$$$$$/|  $$$$$$$ /$$$$$$$$ /$$$$$$$$|  $$$$$$$|  $$$$$$/|  $$$$$$/|  $$$$$$$| $$     ")
         print ("      \______/  \_______/|________/|________/ \____  $$ \______/  \______/  \_______/|__/     ")
         print ("                                              /$$  | $$                                       ")                             
-        print ("                                              |  $$$$$$/                                       ")                               
-        print ("                                               \______/                                    \n\n") 
+        print ("\n\t                                          |  $$$$$$/                                    \n")                               
+        print ("\t                                             \______/                                   \n\n") 
     
     def setup(self):
         while True:
