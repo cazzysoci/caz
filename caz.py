@@ -262,11 +262,11 @@ class MainLoop():
                     print ('Error to read file.')
         while True:
             try:
-                num_process = int(input('> Enter number of process[10000]: '))
+                num_process = int(input('> Entern number of process[6]: '))
             except:
-                num_process = 10000
+                num_process = 6
             break
-        print ("Starting >>> 10000 thread * %s process = %s"%(num_process, 10000*num_process))
+        print ("Starting >>> 100 thread * %s process = %s"%(num_process, 200*num_process))
         time.sleep(2)
         for i in range(num_process):
             ProcessWorker(url, lista).start()
