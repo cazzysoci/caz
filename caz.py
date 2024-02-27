@@ -232,7 +232,7 @@ class MainLoop():
             color = ['a', 'b', 'c', 'd', 'e', 'f']
             os.system('color %s' % (color[random.randint(0, 5)]))
          
-        print("\t  HELLO WORLD 
+        print(".   HELLO WORLD 
                   We are AnonCazzySoci\n\n") 
     
     def setup(self):
