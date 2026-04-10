@@ -171,7 +171,7 @@ char* generate_custom_path() {
     
     const char *attack_paths[] = {
         "/wp-admin/admin-ajax.php", "/cgi-bin/", "/phpmyadmin/", "/mysql/",
-        "/backup/", "/config/", "/database/", "/dump/", "/logs/",
+        "/backup/", "/config/", "/", "/database/", "/dump/", "/logs/",
         "/.git/", "/.env", "/.aws/credentials", "/.ssh/id_rsa",
         "/api/v1/admin", "/api/v2/debug", "/api/v3/internal", "/graphql",
         "/vulnerabilities/", "/shell.php", "/cmd.php", "/eval.php",
