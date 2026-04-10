@@ -1,4 +1,4 @@
-```gcc -o cazzyddos cazzyddos.c -lcurl -lssl -lcrypto -lpthread -O3 -Wall```
+```gcc -o cazzyddos cazzyddos.c -lcurl -lssl -lcrypto -lpthread -O2 -Wall```
 
 
-```./cazzyddos -url https://example.com -duration 60 -concurrency 200 -proxy-file proxies.txt -random-path```
+```./cazzyddos -url https://example.com -duration 30 -concurrency 100 -random-path```
