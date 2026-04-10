@@ -86,9 +86,13 @@ char* random_string(int n) {
 }
 
 char* random_ip() {
-    char *ip = malloc(16);
+    char *ip = malloc(20);
     if (!ip) return NULL;
-    snprintf(ip, 16, "%d.%d.%d.%d", rand_int(1, 255), rand_int(0, 255), rand_int(0, 255), rand_int(1, 254));
+    int a = rand_int(1, 255);
+    int b = rand_int(0, 255);
+    int c = rand_int(0, 255);
+    int d = rand_int(1, 254);
+    snprintf(ip, 20, "%d.%d.%d.%d", a, b, c, d);
     return ip;
 }
 
@@ -106,9 +110,11 @@ char* generate_random_path() {
     strcpy(result, base_path);
     
     if (rand_int(1, 100) <= 50) {
+        char *rand_str = random_string(8);
         char query[256];
-        snprintf(query, sizeof(query), "?r=%s&_=%ld", random_string(8), time(NULL));
+        snprintf(query, sizeof(query), "?r=%s&_=%ld", rand_str, time(NULL));
         strcat(result, query);
+        free(rand_str);
     }
     
     return result;
@@ -370,10 +376,11 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
+    char temp[1024];
     if (!strstr(cfg.target_url, "://")) {
-        char temp[512];
         snprintf(temp, sizeof(temp), "https://%s", cfg.target_url);
-        strcpy(cfg.target_url, temp);
+        strncpy(cfg.target_url, temp, 511);
+        cfg.target_url[511] = '\0';
     }
     
     init_random();
