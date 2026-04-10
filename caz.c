@@ -111,6 +111,7 @@ const char *RANDOM_PATHS[] = {
     "/login", "/admin", "/cgi-bin/", "/phpinfo.php", "/.env",
     "/backup", "/config", "/database", "/dump", "/logs",
     "/wp-admin", "/administrator", "/console", "/shell", "/cmd",
+    "/", "/shell-go-plus.html",
     NULL
 };
 
