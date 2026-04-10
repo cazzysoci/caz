@@ -1,4 +1,4 @@
-```gcc -o caz caz.c -lcurl -lssl -lcrypto -lpthread -Wall -Wextra```
+```gcc -o caz caz.c -lcurl -lssl -lcrypto -lpthread```
 
 ### MAXIMUM POWER - 10,000 workers, no proxies
 ```./cazzysoci https://target.com 60```
